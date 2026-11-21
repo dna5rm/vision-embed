@@ -1,26 +1,88 @@
 # vision-embed
 
-Two services, one contract each. Nothing here is implemented yet.
+The code in this repository is MIT-licensed — see [LICENSE](LICENSE); model
+weights are not included and are not covered by that license.
 
-vision-embed is a stateless measurement service. It accepts an image and returns face embeddings, object labels, and one scene vector. It does not store photos, vectors, names, or cluster ids.
+Two programs, one contract each.
 
-vision-index is a separate process one operator runs for themselves. It calls vision-embed, stores the vectors in SQLite, clusters faces, and records a name only when the operator assigns one. Another person runs their own index. They do not share a people table.
+**vision-embed** is a stateless measurement service. It accepts one image and
+returns face boxes with 512-dim embeddings, COCO-80 object labels, and one
+768-dim scene vector. It stores nothing: no photos, no vectors, no names, no
+cluster ids, no state across requests or restarts. It holds no image bytes at
+any point after a request is answered.
 
-## Specs
+**vision-index** is a separate stateful identity index. It calls vision-embed
+over HTTPS, keeps vectors and cluster ids in SQLite, and records a name only
+when an operator assigns one. It runs no models itself. One index per
+operator: indexes do not share identity data. There is no GUI; the operator
+drives both services over their HTTP surfaces.
 
-- vision-embed-SPEC.md — DRAFT v4. Measurement service. Build from this file alone.
-- vision-index-SPEC.md — DRAFT v4. Identity index. Build from this file alone. It must not contradict the embed spec.
+The split is deliberate: **measurement** (embed) is pure and repeatable —
+on `CPUExecutionProvider`, the same image bytes and the same pinned model
+versions produce identical vectors within per-element |a-b| <= 2e-5
+(CUDA is not covered by that claim) — while **identity** (index) is
+where state, clustering, and naming live. Keeping them apart means nothing
+derived from identity ever leaks back into the measurement service.
 
-Both were scored by a critic. Features under 85 were patched until the registers and the pair cleared 85. Do not reopen settled decisions in the specs. If a build needs a behavior the spec does not state, stop and ask. Do not invent it.
+Documentation:
 
-## Next
+- `docs/how-it-works.md` — walk-through of the request path, the four model
+  roles, config, and observability.
+- `docs/spec/` — the contracts. `vision-embed-SPEC.md`,
+  `vision-index-SPEC.md`, and `vision-embed-cuda-SPEC.md`; the first two
+  are DRAFT v4, the CUDA spec is DRAFT v1.
+- `docs/REPO.md` — what belongs in git and what must stay out.
+- `skills/vision-embed/SKILL.md` — a public caller skill (plain markdown) for
+  an external agent that drives vision-embed or vision-index.
+- `deploy/WEIGHTS.md` — where the four ONNX weights come from (only needed
+  for production embed; tests and vision-index need no weights).
+- `deploy/` — generic Docker deployment (`DEPLOY.md`, Dockerfiles, compose,
+  config examples).
 
-1. Review both specs. The drafts are the contract, not a suggestion.
-2. When the review is done, create the git repo. Do not create it before that. Do not put personal identifiers in the public repo.
-3. Implement vision-embed first, from its spec, including the fake adapter and the tests. Do not download model weights at runtime. Weights are operator-supplied files.
-4. Implement vision-index second, against a running embed service or the fake embed adapter. Do not run InsightFace inside the index process.
-5. A directory of photos is a caller loop of POST /v1/ingest. Do not add a directory walker unless the spec is revised first.
+## What's in the repo
+
+- `vision_embed/` — the measurement service (FastAPI + ONNX Runtime).
+- `vision_index/` — the identity index (HTTPS client of the embed service,
+  SQLite-backed).
+- `tests/` — pytest suite covering the HTTP contracts for both services,
+  config fail-closed rules, the NMS unit, the CUDA provider rules,
+  observability, and container contracts.
+
+## Running the tests
+
+From the repo root:
+
+```sh
+python3.12 -m venv .venv
+.venv/bin/pip install fastapi==0.115.6 uvicorn==0.34.0 python-multipart==0.0.20 numpy==2.1.3 pillow==11.0.0 pyyaml==6.0.2 jsonschema==4.23.0 prometheus_client==0.21.1 httpx==0.28.1 pytest
+.venv/bin/python -m pytest tests/ -v
+```
+
+Those are the app pins from deploy/DEPLOY.md, plus httpx and pytest; GPU
+wheels are not required to run the tests.
+
+The embed tests run against a deterministic fake adapter (seeded from image
+content), so no ONNX weights are needed. Skips apply where tests need
+container tooling or a real CUDA device. Index tests need no network; the
+index client is exercised against an in-process embed stub.
+
+Both services use `adapter_mode: production` only with operator-supplied
+weights, TLS cert/key, and a bearer token file; `adapter_mode: test` with
+`models.adapter: fake` boots the embed service with zero model files.
+
+Provider choice is config-driven: `CPUExecutionProvider` (default) or
+`CUDAExecutionProvider`. CUDA is optional and fail-closed — if it is
+configured but the provider is missing, startup is a fatal error, never a
+silent CPU fallback. Enabling CUDA requires the GPU device reservation shown
+in `deploy/docker-compose.yml`. Note: the code can enable
+`CUDAExecutionProvider`, but numeric equality with CPU is not certified, and
+there is no acceptance envelope yet.
+
+Note on thresholds: the clustering `face_match_max` default in the index spec
+is **0.40**. A deployment may set a tighter live value in its own config; the
+spec number is not changed by doing so.
 
 ## Out of scope until a spec change
 
-GUI, MCP server, phone backup, multi-tenant people tables, public unauthenticated access, storing image bytes, CUDA in v1, automatic naming.
+GUI, MCP server, phone backup, multi-tenant people tables, public
+unauthenticated access, storing image bytes, automatic naming.

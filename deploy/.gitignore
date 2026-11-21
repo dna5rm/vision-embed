@@ -1,0 +1,10 @@
+# Host-side mount targets (operator-side, on the deploy host) — never in the repo
+models/
+tls/
+secrets/
+config/config.yaml
+config.yaml
+
+# local python venv
+.venv/
+__pycache__/

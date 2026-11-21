@@ -1,0 +1,108 @@
+"""Fake adapter set for all four roles (SPEC section 7, F25).
+
+Deterministic, seeded by the image sha256. The full request/response/audit
+path runs with zero ONNX files present. Used only via models.adapter=fake +
+adapter_mode=test.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from pathlib import Path
+
+import numpy as np
+
+from . import DetFaceRecord, DetObjectRecord
+
+SCENE_MODEL = "ViT-L-14/openai"
+SCENE_DIM = 768
+FACE_MODEL = "buffalo_l/w600k_r50"
+FACE_DIM = 512
+COCO_LABELS = [
+    "person", "chair", "car", "dog",
+]
+
+
+def _rng_for(*parts: bytes) -> np.random.Generator:
+    digest = hashlib.sha256(b"|".join(parts)).hexdigest()
+    return np.random.default_rng(int(digest[:16], 16))
+
+
+def _l2(vec: np.ndarray) -> np.ndarray:
+    norm = float(np.linalg.norm(vec))
+    if norm == 0.0:
+        return vec.astype(np.float32)
+    return (vec / norm).astype(np.float32)
+
+
+class FakeFaceEmbedder:
+    """Fake face embedder: deterministic 512-d vector from kps geometry."""
+
+    def load(self, path: Path) -> None:  # loads nothing, by design
+        return None
+
+    def embed(
+        self, bgr: np.ndarray, kps: tuple[tuple[float, float], ...]
+    ) -> tuple[str, int, np.ndarray]:
+        seed = np.ascontiguousarray(np.asarray(kps, dtype=np.float64)).tobytes()
+        rng = _rng_for(b"face", seed)
+        vec = _l2(rng.normal(size=FACE_DIM))
+        return FACE_MODEL, FACE_DIM, vec
+
+
+class FakeDetector:
+    """Fake face detector: one deterministic fixture face inside the image."""
+
+    def load(self, path: Path) -> None:
+        return None
+
+    def detect(self, bgr: np.ndarray) -> list[DetFaceRecord]:
+        h, w = bgr.shape[0], bgr.shape[1]
+        rng = _rng_for(b"det", str(w).encode(), b"x", str(h).encode())
+        bw = max(8, int(w * (0.2 + 0.05 * float(rng.random()))))
+        bh = max(8, int(h * (0.2 + 0.05 * float(rng.random()))))
+        x = int(rng.integers(0, max(1, w - bw)))
+        y = int(rng.integers(0, max(1, h - bh)))
+        kps = [
+            (float(x + 0.30 * bw), float(y + 0.35 * bh)),
+            (float(x + 0.70 * bw), float(y + 0.35 * bh)),
+            (float(x + 0.50 * bw), float(y + 0.55 * bh)),
+            (float(x + 0.35 * bw), float(y + 0.75 * bh)),
+            (float(x + 0.65 * bw), float(y + 0.75 * bh)),
+        ]
+        score = 0.85 + 0.1 * float(rng.random())
+        return [(x, y, bw, bh, float(score), tuple(kps))]
+
+
+class FakeSceneEmbedder:
+    """Fake scene embedder: deterministic 768-d vector from pixel content."""
+
+    def load(self, path: Path) -> None:
+        return None
+
+    def embed(self, rgb: np.ndarray) -> tuple[str, int, np.ndarray]:
+        rng = _rng_for(b"scene", np.ascontiguousarray(rgb).tobytes())
+        vec = _l2(rng.normal(size=SCENE_DIM))
+        return SCENE_MODEL, SCENE_DIM, vec
+
+
+class FakeObjectDetector:
+    """Fake object detector: deterministic COCO-80-label fixture list."""
+
+    def load(self, path: Path) -> None:
+        return None
+
+    def detect(self, rgb: np.ndarray) -> list[DetObjectRecord]:
+        h, w = rgb.shape[0], rgb.shape[1]
+        rng = _rng_for(b"objdet", str(w).encode(), b"x", str(h).encode())
+        count = 1 + int(rng.integers(0, 2))  # one or two objects
+        out: list[DetObjectRecord] = []
+        for i in range(count):
+            label = COCO_LABELS[int(rng.integers(0, len(COCO_LABELS)))]
+            bw = max(8, int(w * (0.15 + 0.2 * float(rng.random()))))
+            bh = max(8, int(h * (0.15 + 0.2 * float(rng.random()))))
+            x = int(rng.integers(0, max(1, w - bw)))
+            y = int(rng.integers(0, max(1, h - bh)))
+            score = 0.55 + 0.3 * float(rng.random())
+            out.append((label, x, y, bw, bh, float(score)))
+        return out

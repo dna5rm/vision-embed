@@ -6,7 +6,7 @@
 **Changelog v2:** closes critic failures FI5, FI7, FI10, FI19, FI20, FI23, FI37, FI38, FI40.
 **Product owner: the service owner (me).** This document is the complete build contract for the stateful identity index. An implementer builds exactly what is specified here. Every behavior not in this contract has an explicit "do not invent" instruction; if a needed detail is absent, the implementer MUST stop and ask, not fill the gap.
 
-Companion document: `vision-embed-SPEC.md` (DRAFT v4). This service **calls** vision-embed for measurements only and consumes **exactly the fields vision-embed's success schema returns**: `image.sha256`, `image.width`, `image.height`, `scene.model/dim/vector` (768), `faces[].bbox/det_score/model/dim/vector` (512), `objects[].label/bbox/score` and `objects[].vector` only when `include_object_vectors=true`. vision-embed returns **no keypoints, no cluster ids, no names**; this spec must not reference fields vision-embed does not return. Do not contradict vision-embed-SPEC.md. Do not rewrite that file.
+Companion document: `docs/spec/vision-embed-SPEC.md` (DRAFT v4). This service **calls** vision-embed for measurements only and consumes **exactly the fields vision-embed's success schema returns**: `image.sha256`, `image.width`, `image.height`, `scene.model/dim/vector` (768), `faces[].bbox/det_score/model/dim/vector` (512), `objects[].label/bbox/score` and `objects[].vector` only when `include_object_vectors=true`. vision-embed returns **no keypoints, no cluster ids, no names**; this spec must not reference fields vision-embed does not return. Do not contradict vision-embed-SPEC.md. Do not rewrite that file.
 
 ---
 

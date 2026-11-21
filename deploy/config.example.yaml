@@ -1,0 +1,42 @@
+# config.example.yaml — vision-embed v1 (verbatim from SPEC §4)
+# Unknown keys are FATAL at startup. See section 6 reason token config.invalid.
+# All secrets are file paths, read once at startup. Values are never logged.
+
+listen:
+  host: "0.0.0.0"
+  port: 8443
+  tls:
+    enabled: true
+    cert_path: "/etc/vision-embed/tls/fullchain.pem"
+    key_path: "/etc/vision-embed/tls/privkey.pem"
+  # operator firewalls public internet access; service enforces nothing at L3
+
+auth:
+  bearer_token_path: "/etc/vision-embed/secrets/authz.bearer"
+
+models:
+  det_path: "/models/det_10g.onnx"
+  face_embed_path: "/models/w600k_r50.onnx"
+  scene_embed_path: "/models/openai-ViT-L-14-visual.onnx"
+  object_det_path: "/models/yolov8n.onnx"
+  det_score_min: 0.5
+  object_score_min: 0.35
+  max_faces: 20
+  execution_provider: "CPUExecutionProvider"   # allowlist: CPUExecutionProvider | CUDAExecutionProvider (opt-in, fatal if unavailable)
+  adapter: "production"
+
+limits:
+  max_body_bytes: 33554432
+  allowed_mime: ["image/jpeg", "image/png", "image/webp"]
+
+metrics:
+  enabled: true
+  port: 9090
+
+audit:
+  enabled: true
+
+adapter_mode: "production"
+
+request_id:
+  header: "X-Request-Id"

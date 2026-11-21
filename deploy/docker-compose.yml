@@ -1,0 +1,102 @@
+# vision-embed v1 — compose example (generic operator paths)
+# Execution provider is config-selected (CPU default). CUDAExecutionProvider is
+# opt-in and fail-closed: it fatals at startup if the provider is unavailable.
+# The GPU reservation block below is OPTIONAL — uncomment only if this host is
+# actually a CUDA/study deployment; the image otherwise runs CPU under plain runc.
+#
+# Mount contract (all host paths are operator-side, NOT in this git repo):
+#   <host tree>/config/config.yaml
+#   <host tree>/models/{det_10g.onnx,w600k_r50.onnx,openai-ViT-L-14-visual.onnx,yolov8n.onnx}
+#   <host tree>/tls/{fullchain.pem,privkey.pem}
+#   <host tree>/secrets/authz.bearer
+# Certs, weights, and the bearer file are NOT generated here and are gitignored.
+# Substitute your own host bind path for HOST_TREE below.
+
+name: vision-embed
+
+services:
+  vision-embed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vision-embed:v1
+    read_only: true
+    user: "65532:65532"
+    # OPTIONAL GPU reservation — enable only for a CUDA deployment; the CPU
+    # execution provider loads and runs on this image without any GPU or the
+    # nvidia container runtime. CUDAExecutionProvider fatals if configured but
+    # unavailable or unreserved, by design.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: ["gpu"]
+    # Compose `gpus: all` shorthand equivalent (uncomment, remove deploy block):
+    # gpus: all
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    ports:
+      # Listener is TLS-only; operator firewalls public internet (SPEC INV-9).
+      - "8443:8443"
+      - "9090:9090"
+    volumes:
+      - HOST_TREE/config/config.yaml:/opt/app/config.yaml:ro
+      - HOST_TREE/models/det_10g.onnx:/models/det_10g.onnx:ro
+      - HOST_TREE/models/w600k_r50.onnx:/models/w600k_r50.onnx:ro
+      - HOST_TREE/models/openai-ViT-L-14-visual.onnx:/models/openai-ViT-L-14-visual.onnx:ro
+      - HOST_TREE/models/yolov8n.onnx:/models/yolov8n.onnx:ro
+      - HOST_TREE/tls/fullchain.pem:/etc/vision-embed/tls/fullchain.pem:ro
+      - HOST_TREE/tls/privkey.pem:/etc/vision-embed/tls/privkey.pem:ro
+      - HOST_TREE/secrets/authz.bearer:/etc/vision-embed/secrets/authz.bearer:ro
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nproc: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+
+  vision-index:
+    build:
+      context: .
+      dockerfile: Dockerfile.index
+    image: vision-index:v1
+    read_only: true
+    user: "65532:65532"
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    ports:
+      # TLS-only listener on 9443; metrics on loopback-only 9190 (index config).
+      # Inside the compose network the container still binds per its config;
+      # publish only if you expose these to the operator host.
+      - "9443:9443"
+      - "9190:9190"
+    volumes:
+      # Index config (copy of deploy/config.index.example.yaml); set
+      # embed.base_url to "https://vision-embed:8443" for the compose network.
+      - HOST_TREE/config/config.index.yaml:/etc/vision-index/config.yaml:ro
+      # SQLite db is the ONLY writable mount (rw); parent dir must exist.
+      - HOST_TREE/data/index.sqlite3:/var/lib/vision-index/index.sqlite3:rw
+      # Index TLS cert/key for the 9443 listener.
+      - HOST_TREE/tls/index-fullchain.pem:/etc/vision-index/tls/fullchain.pem:ro
+      - HOST_TREE/tls/index-privkey.pem:/etc/vision-index/tls/privkey.pem:ro
+      # CA bundle the index uses to verify the embed service TLS (embed-ca.pem).
+      - HOST_TREE/tls/embed-ca.pem:/etc/vision-index/tls/embed-ca.pem:ro
+      # Bearer tokens, ro-mounted, read once at startup.
+      - HOST_TREE/secrets/index-authz.bearer:/secrets/index-authz.bearer:ro
+      - HOST_TREE/secrets/embed-authz.bearer:/secrets/embed-authz.bearer:ro
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nproc: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped

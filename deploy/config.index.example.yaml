@@ -1,0 +1,48 @@
+# config.index.example.yaml — vision-index v1
+# NOTE: vision-index SPEC §13a gate 6 wants a `config.example.yaml` matching
+# its section 4, but vision-embed (same repo) has its own
+# `config.example.yaml` with the same requirement. Spec conflict → recorded in
+# EXEC-QUESTIONS-INDEX.md Q1; fail-closed reading does not overwrite the
+# existing artifact, so the index example lives here. See section 4 of
+# docs/spec/vision-index-SPEC.md, DRAFT v4.
+#
+# Unknown keys are FATAL at startup (exit 1, one JSON fatal line on stdout).
+# All secrets are file paths mounted by the operator; values are never logged.
+
+listen:
+  host: "0.0.0.0"
+  port: 9443
+  tls:
+    enabled: true
+    cert_path: "/etc/vision-index/tls/fullchain.pem"
+    key_path: "/etc/vision-index/tls/privkey.pem"
+
+auth:
+  bearer_token_path: "/secrets/index-authz.bearer"
+  # file contains exactly one line; that line is the token; read once at startup
+
+embed:
+  base_url: "https://<embed-host>:8443"     # vision-embed base URL; no default; absent is fatal
+  bearer_token_path: "/secrets/embed-authz.bearer"  # operator mounts the token; never in the repo
+  timeout_seconds: 60                         # per embed call; single retry on connect failure only
+  # this service sends include_object_vectors=true on every embed call
+
+db:
+  path: "/var/lib/vision-index/index.sqlite3"  # exactly one file; parent dir must exist
+
+clustering:
+  face_match_max: 0.40        # cosine-distance join threshold; section 8
+
+name:
+  min_length: 1
+  max_length: 64
+
+metrics:
+  enabled: true
+  port: 9190
+  host: "127.0.0.1"
+
+audit:
+  enabled: true
+
+adapter_mode: "production"    # only "production" or "test"; other values fatal

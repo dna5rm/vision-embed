@@ -17,7 +17,7 @@ Numbered invariants — each is an acceptance gate, not a suggestion:
 
 1. **INV-1 Stateless.** The server stores nothing. No photos, no vectors, no names, no cluster ids, no database of people, no cache across requests, no state across restarts.
 2. **INV-2 No identity judgments.** The response MUST NOT contain a cluster id, a person name, or any same-person/same-previous-call relationship. Matching against a caller's own index is the caller's job. The server has no index.
-3. **INV-3 Determinism.** Same image bytes + same pinned model files ⇒ same vectors. v1 requires `CPUExecutionProvider`; CUDA is config-off until a documented numeric tolerance test exists (section 2). Do not enable a GPU provider in v1.
+3. **INV-3 Determinism.** Same image bytes + same pinned model files ⇒ same vectors. v1 requires `CPUExecutionProvider`; CUDA is config-off until a documented numeric tolerance test exists (section 2). Do not enable a GPU provider in v1. The provider configuration key is governed by the additive CUDA spec (`vision-embed-cuda-SPEC.md`), which authorizes `CUDAExecutionProvider` as a fail-closed config — see that document for the current provider contract.
 4. **INV-4 Fail closed.** Unknown config keys are a fatal startup error. A missing model file is a fatal startup error — never a 200 with empty arrays. Unknown routes are 404 with a reason token.
 5. **INV-5 One process.** No background workers, no queue, no sidecars, no scheduler.
 6. **INV-6 Auth minimal and owned here.** One static bearer token loaded from a file path in config, compared in constant time. No OAuth, no IdP, no mTLS in v1 (listener is still TLS-only). Callers never receive any model-host credentials; there are no vendor credentials anywhere in this service.
@@ -47,7 +47,7 @@ Do not invent: a person store, an identity graph, a face-name mapping, a vector 
 - `openai-ViT-L-14-visual.onnx` is operator-supplied per the note above; startup fails if absent.
 
 ### Determinism
-- Default provider is `CPUExecutionProvider` and this is a hard v1 default. CUDAExecutionProvider may exist in code as a config key but is **config-off by default and MUST remain off until a tolerance test exists**; as of this draft I cannot cite an onnxruntime cross-execution-provider bitwise-determinism guarantee, so v1 does not claim GPU/CPU equality. All determinism claims in this spec apply to CPU-only runs. If CUDA is enabled before a tolerance test exists, that is a spec violation, not an optimization.
+- Default provider is `CPUExecutionProvider` and this is a hard v1 default. CUDAExecutionProvider may exist in code as a config key but is **config-off by default and MUST remain off until a tolerance test exists**; as of this draft I cannot cite an onnxruntime cross-execution-provider bitwise-determinism guarantee, so v1 does not claim GPU/CPU equality. All determinism claims in this spec apply to CPU-only runs. Do not claim GPU/CPU equality on CPU-only determinism evidence; provider configuration is now governed by the additive CUDA spec (`vision-embed-cuda-SPEC.md`), which authorizes `CUDAExecutionProvider` fail-closed and certifies no numeric equality with CPU.
 - Preprocessing (resize/crop/normalization) must be pure Python/numpy implemented identically for all paths; do not introduce library version drift between preprocessing runs.
 - Document response field `vector` values as float32; compare with tolerance `|a-b| <= 2e-5` per element on the same image bytes across runs and restarts (CPU provider).
 
@@ -179,8 +179,8 @@ Rules:
 
 ### Processing order (numbered, stops at first failure)
 1. **Size limit** — enforce `Content-Length`/streamed size ≤ 32 MiB. Failure → `limits.body_too_large`.
-2. **Content type (magic-byte sniff)** — jpeg (`FF D8 FF`), png (`89 50 4E 47`), webp (`RIFF....WEBP`). Failure → `format.unsupported`.
-3. **Auth** — constant-time bearer comparison. Failure → `auth.invalid_token`.
+2. **Auth** — constant-time bearer comparison. Failure → `auth.invalid_token`. On rejection the body is not read and not sniffed.
+3. **Content type (magic-byte sniff)** — jpeg (`FF D8 FF`), png (`89 50 4E 47`), webp (`RIFF....WEBP`). Failure → `format.unsupported`.
 4. **Decode** — decode full image to a numpy RGB uint8 array. Failure → `decode.failed`.
 5. **Model inference** — detector → face records; InsightFace face embedding per face (cap `max_faces`); object detector; scene embedder (whole image); optional per-object crop embedder. Failure → `inference.failed`.
 6. **Schema-validate** the response object against the closed schema (below). Failure → `response.validation_failed` (this is a server bug; must be surfaced, never swallowed).
@@ -247,6 +247,8 @@ No other reason tokens exist. Do not invent: `rate_limited`, `insufficient_permi
       "label": "<COCO-80 class string>",
       "bbox": { "x": 0, "y": 0, "w": 0, "h": 0 },
       "score": 0.0,
+      "model": "ViT-L-14/openai",
+      "dim": 768,
       "vector": [ /* float32, length 768; present only if include_object_vectors=true */ ]
     }
   ]
@@ -377,7 +379,7 @@ Definition of done for v1 — named, checkable:
 
 ## 13. Out of scope (v1)
 
-Storage of any kind, clustering, naming, GUI, MCP server, phone backup ingestion, public internet exposure, path-based ingest (a filesystem path in the public request contract), CUDA in v1, OpenViking, Hermes-specific code, mTLS, multitenancy, rate limiting, model download at runtime, syslog, retry queues, batch endpoints, video, audio. The caller owns any index, matching, clustering, naming, and persistence.
+Storage of any kind, clustering, naming, GUI, MCP server, phone backup ingestion, public internet exposure, path-based ingest (a filesystem path in the public request contract), CUDA in v1, OpenViking, agent-runtime-specific code, mTLS, multitenancy, rate limiting, model download at runtime, syslog, retry queues, batch endpoints, video, audio. The caller owns any index, matching, clustering, naming, and persistence.
 
 ---
 
@@ -423,7 +425,7 @@ Storage of any kind, clustering, naming, GUI, MCP server, phone backup ingestion
 | F36 | enforces a closed endpoint set of exactly { /healthz, /readyz, /v1/embed } with reason tokens for 404 and 405 |
 | F37 | enforces the closed nine-token reason set with a uniform error envelope and no reason tokens outside the list |
 | F38 | validates every response against the closed success schema with `additionalProperties: false` on every object |
-| F39 | stops processing at the first failure in the fixed order (size limit → content type → auth → decode → inference → schema-validate → audit → body) with each step's own reason token |
+| F39 | stops processing at the first failure in the fixed order (size limit → auth → content type → decode → inference → schema-validate → audit → body) with each step's own reason token |
 | F40 | still returns the response body if the stdout audit write fails silently, without inventing a fallback file, syslog, or retry queue |
 
 ## 14a. Feature register — reason-token coverage (map)
@@ -442,12 +444,12 @@ Storage of any kind, clustering, naming, GUI, MCP server, phone backup ingestion
 
 | Item | My recommended default |
 |---|---|
-| Scene embedder dim (768) and exact export recipe for `openai-ViT-L-14-visual.onnx` | 768 (ViT-L/14 hidden), open_clip export script, opset 14, mean/std CLIP normalization. |
+| Exact export recipe for `openai-ViT-L-14-visual.onnx` (scene dim is closed at 768) | open_clip export script, opset 14, mean/std CLIP normalization. |
 | `det_score_min` exact value | 0.5 (config default listed above). |
 | `object_score_min` exact value | 0.35. |
 | `max_faces` exact value | 20. |
 | Metrics port default | 9090. |
-| Whether to publish an OpenAPI schema file alongside this SPEC | Yes, generate from the FastAPI app and commit as `openapi.json`, read-only in the image. |
+| Whether to publish an OpenAPI schema file alongside this SPEC | No. The FastAPI apps run with `docs_url`, `redoc_url`, and `openapi_url` all `None`; `/openapi.json`, `/docs`, and `/redoc` are not routes and no schema artifact is committed. |
 
 Everything else above, including all other section 4 defaults, is decided and closed. Do not reopen decided items.
 
