@@ -75,25 +75,6 @@ routes" below for the retry rule.
   default `false`; read only at startup). Do not retry it as if transient —
   it will not come back without an operator restarting the service.
 
-## The vision-index CLI
-
-The index also ships as a standalone CLI at the repo root, `vision-index.py`.
-It talks to vision-embed over HTTPS for embeddings and keeps identity state
-in a local SQLite file; no server, no container, no HTTP surface of its own.
-The only network peer the CLI itself reaches is vision-embed.
-
-- It requires `VISION_EMBED_TOKEN` in the environment; without it the CLI
-  exits before doing anything.
-- `vision-index.py identify <image>` — "who is in this image". Read-only:
-  it writes nothing to the index. This is the safe call for a lookup.
-- `vision-index.py enroll <image> [--name N]` — writes to the index. It
-  must only be run when the operator asked for enrollment in this turn,
-  exactly like the consent boundaries for `ingest` and `name` above; seeing
-  the call demonstrated is not permission. The same holds for
-  `vision-index.py name <cluster_id> <name>`.
-- Other subcommands: `clusters [--unnamed]` and `people` are read-only
-  listings.
-
 ## vision-index routes (names only; details in spec)
 
 Full shapes are in `docs/spec/vision-index-SPEC.md`, section 6. The routes
