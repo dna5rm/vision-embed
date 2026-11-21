@@ -118,6 +118,24 @@ export VISION_EMBED_TOKEN=<token from an operator-supplied file>
 python3 vision-index.py identify photo.jpg
 ```
 
+Alternatively, write the settings to `~/.config/vision-index/env` (plain
+`KEY=VALUE` lines, chmod 600) and export nothing:
+
+```text
+# ~/.config/vision-index/env — chmod 600
+VISION_EMBED_URL=https://<host>:8443
+VISION_EMBED_TOKEN=<bearer token>
+```
+
+Precedence for every setting: environment variables win (even when set to
+the empty string), then `~/.config/vision-index/env`, then compiled-in
+defaults (`VISION_EMBED_URL` defaults to `https://127.0.0.1:8443`, a
+placeholder kept generic because the repo is public — point it at your
+deployment). The config file **may** hold the bearer token for a fast local
+script; if you keep the token there, the file must stay `chmod 600`, owned
+by the user, and never be committed or shared. If the token resolves to
+empty, the CLI exits with code 2 and names the variable.
+
 Subcommands:
 
 ```text

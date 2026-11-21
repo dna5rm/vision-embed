@@ -300,6 +300,13 @@ Environment variables:
   separate deployment choice).
 - `VISION_EMBED_CA` — optional path to a CA bundle for the TLS conn.
 
+Config file: every variable above can instead live in
+`~/.config/vision-index/env` as plain `KEY=VALUE` lines. Precedence: env
+first (an empty env value still counts as set), then the config file, then
+the compiled-in defaults. Keep the file `chmod 600`; it may hold
+`VISION_EMBED_TOKEN`, which is accepted storage for a user-local script —
+it must never be committed or group/world-readable.
+
 TLS to the embed service uses trust-on-first-use for self-signed servers:
 the CLI fingerprints the peer cert with a metadata-only probe **before**
 the request body is sent, so each call makes exactly one POST — the image

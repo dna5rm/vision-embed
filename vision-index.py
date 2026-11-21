@@ -18,6 +18,10 @@ Environment:
   VISION_INDEX_DB       sqlite path (default ~/.local/share/vision-index/index.sqlite3)
   VISION_FACE_MATCH_MAX cosine distance floor for a same-person match (default 0.15)
 
+All of the above can also live in ~/.config/vision-index/env (plain KEY=VALUE
+lines, chmod 600; it may hold the bearer token). Precedence: env vars win
+(even when set to empty), then the config file, then the compiled defaults.
+
 Output: one JSON object on stdout, indent=2 on a TTY, compact when piped.
 Errors: one JSON line on stderr, exit 1.
 """
@@ -50,6 +54,21 @@ NAME_MAX_LEN = 64
 def _die(reason: str, detail: str = "") -> None:
     print(json.dumps({"error": reason, "detail": detail}, separators=(",", ":")), file=sys.stderr)
     sys.exit(1)
+
+
+def _excepthook(t, v, tb) -> None:
+    """Last-resort net: no unexpected exception ever surfaces as a traceback."""
+    if issubclass(t, SystemExit):
+        sys.__excepthook__(t, v, tb)
+        return
+    print(
+        json.dumps({"error": "internal.error", "detail": t.__name__}, separators=(",", ":")),
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+sys.excepthook = _excepthook
 
 
 def _bootstrap_sqlite_vec() -> None:
@@ -307,6 +326,46 @@ def _tls_context(ca_path: str = None, pinned_pem: str = None) -> ssl.SSLContext:
 
 TLS_PIN_FILE = "~/.config/vision-index/tls-fingerprints.json"
 
+# Per-user config file: plain KEY=VALUE lines, mode 600. Read after env vars,
+# before compiled defaults — see _config_file_values(). It may legitimately
+# hold VISION_EMBED_TOKEN; keep it 600 and out of any repo.
+CONFIG_FILE = "~/.config/vision-index/env"
+CONFIG_KEYS = (
+    "VISION_EMBED_URL",
+    "VISION_EMBED_TOKEN",
+    "VISION_EMBED_CA",
+    "VISION_INDEX_DB",
+    "VISION_FACE_MATCH_MAX",
+)
+
+
+def _config_file_values() -> dict:
+    path = Path(os.path.expanduser(CONFIG_FILE))
+    try:
+        text = path.read_text()
+    except OSError:
+        return {}
+    vals = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key in CONFIG_KEYS:
+            vals[key] = value.strip()
+    return vals
+
+
+_config_values = _config_file_values()
+
+
+def _resolve_config(key: str, default: str) -> str:
+    """Env first (even when set to empty), then the config file, then default."""
+    if key in os.environ:
+        return os.environ[key]
+    return _config_values.get(key, default)
+
 
 def _server_fingerprint(host: str, port: int) -> str:
     """Read the peer cert WITHOUT sending any request data, to pin it (TOFU)."""
@@ -385,14 +444,22 @@ def _embed(image_path: str, base_url: str, token: str) -> dict:
 
     host = urlparse(base_url).hostname
     port = urlparse(base_url).port or 443
-    ca = os.environ.get("VISION_EMBED_CA", "")
+    ca = _resolve_config("VISION_EMBED_CA", "")
     if ca:
         ctx = _tls_context(ca_path=ca)
     else:
         # No CA configured: pin (TOFU) BEFORE any request bytes are sent, so a
         # self-signed server costs at most one upload — never a re-POST of the
         # image after a cert failure. _pin_tls dies on a changed fingerprint.
-        ctx = _tls_context(pinned_pem=_pin_tls(host))
+        # Every pre-pin network step (TCP connect, TLS handshake, fingerprint
+        # read) is wrapped here: failures are one JSON line, never a traceback.
+        try:
+            ctx = _tls_context(pinned_pem=_pin_tls(host))
+        except (ConnectionRefusedError, socket.timeout, socket.gaierror, OSError, ssl.SSLError) as exc:
+            _die(
+                "embed.unreachable",
+                f"cannot reach {host}:{port} ({exc.__class__.__name__}: {str(exc).strip() or 'no detail'})",
+            )
 
     resp, status, retried_busy = None, None, False
     for attempt in range(3):
@@ -486,14 +553,14 @@ sub.add_parser("people", help="list named people only")
 
 args = ap.parse_args()
 
-embed_url = os.environ.get("VISION_EMBED_URL", DEFAULT_EMBED_URL)
-token = os.environ.get("VISION_EMBED_TOKEN", "")
-index_db = os.environ.get("VISION_INDEX_DB", DEFAULT_INDEX_DB)
-face_match_max = float(os.environ.get("VISION_FACE_MATCH_MAX", str(DEFAULT_FACE_MATCH_MAX)))
+embed_url = _resolve_config("VISION_EMBED_URL", DEFAULT_EMBED_URL)
+token = _resolve_config("VISION_EMBED_TOKEN", "")
+index_db = _resolve_config("VISION_INDEX_DB", DEFAULT_INDEX_DB)
+face_match_max = float(_resolve_config("VISION_FACE_MATCH_MAX", str(DEFAULT_FACE_MATCH_MAX)))
 
 if token == "":
     print(
-        "error: set VISION_EMBED_TOKEN (bearer token for the vision-embed service)",
+        "error: set VISION_EMBED_TOKEN (in the env or in ~/.config/vision-index/env)",
         file=sys.stderr,
     )
     sys.exit(2)
