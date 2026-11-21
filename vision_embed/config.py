@@ -27,6 +27,7 @@ _TOP_KEYS = {
     "audit",
     "adapter_mode",
     "request_id",
+    "routes",
 }
 _LISTEN_KEYS = {"host", "port", "tls"}
 _TLS_KEYS = {"enabled", "cert_path", "key_path"}
@@ -41,11 +42,22 @@ _MODELS_KEYS = {
     "max_faces",
     "execution_provider",
     "adapter",
+    "florence_dir_path",
+    "tagger_onnx_path",
+    "tag_names_path",
+    "tag_suppress_path",
+    "max_new_tokens",
 }
-_LIMITS_KEYS = {"max_body_bytes", "allowed_mime"}
+_LIMITS_KEYS = {"max_body_bytes", "allowed_mime", "max_regions"}
 _METRICS_KEYS = {"enabled", "port"}
 _AUDIT_KEYS = {"enabled"}
 _REQUEST_ID_KEYS = {"header"}
+_ROUTES_KEYS = {
+    "describe_enabled",
+    "tag_enabled",
+    "describe_min_free_bytes",
+    "tag_min_free_bytes",
+}
 
 _MODEL_FILES = ("det_path", "face_embed_path", "scene_embed_path", "object_det_path")
 
@@ -74,6 +86,17 @@ class Config:
     metrics_port: int = 9090
     audit_enabled: bool = True
     request_id_header: str = "X-Request-Id"
+    # v12 additive keys (describe/tag routes). Switches default false.
+    florence_dir_path: str = ""
+    tagger_onnx_path: str = ""
+    tag_names_path: str = ""
+    tag_suppress_path: str = ""
+    max_new_tokens: int = 1024
+    describe_enabled: bool = False
+    tag_enabled: bool = False
+    describe_min_free_bytes: int | None = None  # no default is ever invented
+    tag_min_free_bytes: int | None = None
+    max_regions: int = 100
 
 
 def _unknown_keys(d: dict[str, Any], allowed: set[str], where: str) -> None:
@@ -199,6 +222,38 @@ def load_config(path: Path) -> Config:
     max_faces = int(models.get("max_faces", 20))
     max_body_bytes = int(limits.get("max_body_bytes", 33554432))
     allowed_mime = list(limits.get("allowed_mime", ["image/jpeg", "image/png", "image/webp"]))
+    max_regions = int(limits.get("max_regions", 100))
+
+    # v12 routes block: unknown keys fatal; switch defaults false; minima have
+    # NO default — presence is only *required* under the exact two-condition
+    # rule, which the server bootstrap (run_server) enforces.
+    routes = raw.get("routes") or {}
+    _unknown_keys(routes, _ROUTES_KEYS, "routes")
+
+    def _switch(name: str) -> bool:
+        val = routes.get(name, False)
+        if val not in (True, False):
+            raise FatalStartupError("config.invalid", f"routes.{name} must be a boolean, got {val!r}")
+        return val
+
+    describe_enabled = _switch("describe_enabled")
+    tag_enabled = _switch("tag_enabled")
+
+    def _minimum(name: str) -> int | None:
+        if name not in routes:
+            return None
+        val = routes[name]
+        if isinstance(val, bool) or not isinstance(val, int) or val < 0:
+            raise FatalStartupError(
+                "config.invalid", f"routes.{name} must be a non-negative integer byte count"
+            )
+        return val
+
+    florence_dir_path = str(models.get("florence_dir_path", ""))
+    tagger_onnx_path = str(models.get("tagger_onnx_path", ""))
+    tag_names_path = str(models.get("tag_names_path", ""))
+    tag_suppress_path = str(models.get("tag_suppress_path", ""))
+    max_new_tokens = int(models.get("max_new_tokens", 1024))
 
     return Config(
         host=host,
@@ -223,7 +278,37 @@ def load_config(path: Path) -> Config:
         metrics_port=int(metrics.get("port", 9090)),
         audit_enabled=bool(audit.get("enabled", True)),
         request_id_header=str(request_id.get("header", "X-Request-Id")),
+        florence_dir_path=florence_dir_path,
+        tagger_onnx_path=tagger_onnx_path,
+        tag_names_path=tag_names_path,
+        tag_suppress_path=tag_suppress_path,
+        max_new_tokens=max_new_tokens,
+        describe_enabled=describe_enabled,
+        tag_enabled=tag_enabled,
+        describe_min_free_bytes=_minimum("describe_min_free_bytes"),
+        tag_min_free_bytes=_minimum("tag_min_free_bytes"),
+        max_regions=max_regions,
     )
+
+
+def validate_route_minima(cfg: Config) -> None:
+    """v12 section 2e: the minima keys are REQUIRED exactly when their route's
+    switch is true AND models.execution_provider is CUDAExecutionProvider.
+    Enforced in the server bootstrap, before any listener binds; nothing is
+    validated or required in any other state, and no byte default exists.
+    """
+    if cfg.execution_provider != "CUDAExecutionProvider":
+        return
+    for switch_key, enabled, min_key in (
+        ("routes.describe_enabled", cfg.describe_enabled, "describe_min_free_bytes"),
+        ("routes.tag_enabled", cfg.tag_enabled, "tag_min_free_bytes"),
+    ):
+        if enabled and getattr(cfg, min_key) is None:
+            raise FatalStartupError(
+                "config.invalid",
+                f"routes.{min_key} is required when {switch_key} is true and "
+                "models.execution_provider is CUDAExecutionProvider",
+            )
 
 
 def fatal_line(reason: str, detail: str) -> str:

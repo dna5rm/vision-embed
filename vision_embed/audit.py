@@ -20,6 +20,46 @@ def rfc3339_utc_now() -> str:
 AUDIT_KEYS = frozenset({"ts", "request_id", "sha256", "bytes", "faces", "objects", "outcome", "reason"})
 
 
+def emit_describe_audit_line(
+    *,
+    request_id: str,
+    route: str,
+    sha256: str | None,
+    byte_count: int,
+    task: str | None = None,
+    regions: int | None = None,
+    tags: int | None = None,
+    threshold: str | float | None = None,
+    outcome: str,
+    reason: str,
+    enabled: bool = True,
+) -> None:
+    """Section 10 line for POST /v1/describe, POST /v1/tag and GET /v1/runtime:
+    exactly one stdout JSON line; never logs image bytes, captions, tag
+    strings, tokens, or unavailable_reason values."""
+    if not enabled:
+        return
+    record = {
+        "ts": rfc3339_utc_now(),
+        "request_id": request_id,
+        "route": route,
+        "sha256": sha256 if sha256 else None,
+        "bytes": byte_count,
+        "task": task,
+        "regions": regions,
+        "tags": tags,
+        "threshold": threshold,
+        "outcome": outcome,
+        "reason": reason,
+    }
+    line = json.dumps(record, separators=(",", ":")) + "\n"
+    try:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+    except (ValueError, OSError):
+        pass
+
+
 def emit_audit_line(
     *,
     request_id: str,

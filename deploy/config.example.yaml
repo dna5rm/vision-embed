@@ -22,11 +22,17 @@ models:
   det_score_min: 0.5
   object_score_min: 0.35
   max_faces: 20
+  florence_dir_path: "/models/florence2/"   # operator-supplied LOCAL DIRECTORY (weights + processor files); exact directory pinned here
+  tagger_onnx_path: "/models/wd14.onnx"     # operator-supplied; exact filename pinned here
+  tag_names_path: "/models/tag_names.txt"   # ordered tag-name list, one per line; length must equal the score vector length
+  tag_suppress_path: "/models/tag_suppress.txt"  # tag names never returned on the wire (ratings, character names, etc.)
+  max_new_tokens: 1024                      # OPERATOR DEFAULT for Florence-2 decode length, not a model-card fact
   execution_provider: "CPUExecutionProvider"   # allowlist: CPUExecutionProvider | CUDAExecutionProvider (opt-in, fatal if unavailable)
   adapter: "production"
 
 limits:
   max_body_bytes: 33554432
+  max_regions: 100                          # hard cap on regions[] returned — beyond cap dropped, outcome stays ok
   allowed_mime: ["image/jpeg", "image/png", "image/webp"]
 
 metrics:
@@ -40,3 +46,19 @@ adapter_mode: "production"
 
 request_id:
   header: "X-Request-Id"
+
+routes:
+  describe_enabled: false                   # STARTUP-ONLY switch; changing it requires a restart. false: Florence-2 is NOT loaded,
+                                            # its weight/processor files are not required or mount-checked, the role is not counted
+                                            # in models_loaded and not required by the ready gate, and POST /v1/describe returns
+                                            # 404 route.disabled. true: current fail-closed rule stands (missing weight file fatal before bind).
+  tag_enabled: false                        # same semantics for POST /v1/tag and the WD14 tagger. Both keys default to false, so the
+                                            # live embed behavior (four embed roles, models_loaded = 4) is the default. There is NO
+                                            # switch for /healthz, /readyz, or POST /v1/embed — they cannot be disabled. Unknown keys
+                                            # under routes: are FATAL; a missing key is not fatal because its default (false) applies.
+  # v12 startup free-memory minima (section 2e). Integers in BYTES, NO DEFAULT.
+  # Each key is REQUIRED only when its switch above is true AND
+  # models.execution_provider is "CUDAExecutionProvider"; missing in exactly
+  # that case is fatal config.invalid before bind. Otherwise it may be absent.
+  # describe_min_free_bytes: <operator-set integer>   # shown commented: not required while the switch is false
+  # tag_min_free_bytes: <operator-set integer>        # same rule; the value is the operator's — no byte default exists

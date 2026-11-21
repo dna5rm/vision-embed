@@ -5,7 +5,9 @@ project can follow the architecture.
 
 vision-embed is a stateless HTTP service. A caller sends one image, and the
 service returns measurements: face boxes with 512-dim face embeddings, object
-boxes with COCO-80 labels, and one 768-dim scene embedding. It returns
+boxes with COCO-80 labels, and one 768-dim scene embedding; two optional
+routes add a Florence-2 caption or region description and a WD14 tag list
+with scores. It returns
 **vectors and boxes, nothing else** — no photos, no names, no cluster ids, no
 state across requests or restarts, no image bytes held after the response.
 Identity matching is the caller's job, done elsewhere.
@@ -18,13 +20,17 @@ no image bytes. Two index operators do not share a people table.
 
 ## Request path
 
-The HTTP surface is closed: `/healthz` (GET), `/readyz` (GET), and `/v1/embed`
-(POST). Anything else is a 404, and other methods are a 405. Live docs pages
+The HTTP surface is closed: `/healthz` (GET), `/readyz` (GET), `/v1/embed`
+(POST), `/v1/describe` (POST), `/v1/tag` (POST), and `/v1/runtime` (GET).
+Anything else is a 404, and other methods are a 405. Live docs pages
 (`/docs`, `/redoc`, `/openapi.json`) are disabled and are not routes; no
 published schema artifact exists.
 
-`/healthz` always answers ok. `/readyz` answers 200 only after all four model
-adapters have loaded, and 503 with a `not_ready` reason before that.
+`/healthz` always answers ok. `/readyz` answers 200 only after every model
+role this process loads has loaded, and 503 with a `not_ready` reason before
+that. `models_loaded` is the count of roles **actually loaded** — with both
+route switches off (the default) that is the four embed roles, so it is 4,
+5, or 6 by switch state, never a hardcoded 6.
 
 A `POST /v1/embed` runs a fixed order:
 
@@ -45,18 +51,64 @@ A `POST /v1/embed` runs a fixed order:
    the request id, the image sha256, byte count, face and object counts, and
    the outcome. Image bytes, embeddings, and tokens are never logged.
 
+### The /v1/describe and /v1/tag request paths
+
+`POST /v1/describe` and `POST /v1/tag` are multipart, exactly like
+`POST /v1/embed`: the image field is named `image`, auth runs before the
+body is parsed, and the same `limits.max_body_bytes` cap applies. `describe`
+takes one further field, `task`, whose value must be one of the eight closed
+Florence-2 wire tasks (`<CAPTION>`, `<DETAILED_CAPTION>`,
+`<MORE_DETAILED_CAPTION>`, `<OD>`, `<DENSE_REGION_CAPTION>`,
+`<REGION_PROPOSAL>`, `<OCR>`, `<OCR_WITH_REGION>`); anything else is 422
+`task.unsupported`. It returns the model (`florence2`), the echoed `task`,
+and either generated `text` or a `regions` array. `tag` takes one further
+field, `tag_threshold`; a bare `threshold` field is ignored and yields 422
+`decode.failed` with message `missing tag_threshold field`. It returns the
+model (`wd14`), `threshold_used`, and `tags` as a list of `tag` plus
+`score`.
+
+### /v1/runtime
+
+`GET /v1/runtime` requires the same bearer token as the three POST routes.
+It is an operator inventory read: `uptime_seconds`, the configured
+`execution_provider`, a `routes` object with the three route flags, a
+`models` array — the six roles in fixed order (face, face_detector, scene,
+object, florence2, tagger), each with `role`, `model_id`, `loaded`, and
+`unavailable_reason` — and a closed `gpu` object (`available`,
+`device_count`, `name`, `memory_total_bytes`, `memory_used_bytes`, read via
+the NVML library for device index 0). It loads no model and does not affect
+readiness; a failed GPU read is reported through the `gpu` object, not as
+an HTTP error.
+
+### GPU admission lock
+
+When `execution_provider` is `CUDAExecutionProvider`, `POST /v1/embed`,
+`POST /v1/describe`, and `POST /v1/tag` share one in-process lock: a
+request that arrives while one GPU inference is running is rejected 429
+`gpu.busy` and does not wait — there is no queue; the caller retries. The
+lock governs this process only; other processes on the same GPU are not
+consulted. `/healthz`, `/readyz`, and `/v1/runtime` do not take the lock.
+On `CPUExecutionProvider` there is no lock and no `gpu.busy`.
+
 Every response, success or error, carries an `X-Request-Id` header. The
 service honors a caller's request id header if it is sane and short, otherwise
-it generates a uuid. Errors use a closed set of reason tokens such as
-`auth.invalid_token`, `format.unsupported`, and `decode.failed`.
+it generates a uuid. Errors use a closed set of reason tokens; the
+process-wide closed set is exactly twelve tokens — the nine embed-scope
+tokens such as `auth.invalid_token`, `format.unsupported`, and
+`decode.failed`, plus `task.unsupported` (422), `route.disabled` (404), and
+`gpu.busy` (429).
 
-## The four model roles
+## The six model roles
 
-All four roles are defined as Protocols in `vision_embed/adapters/__init__.py`,
-so production and fake implementations are interchangeable. All four models
-are operator-supplied ONNX files at config paths. Nothing is downloaded at
-runtime. In production mode a missing weight file is a fatal startup error,
-never a 200 with empty arrays.
+The four embed roles are defined as Protocols in `vision_embed/adapters/__init__.py`,
+so production and fake implementations are interchangeable; the Florence-2
+and tagger roles live behind their own adapters and are loaded only when
+their startup switches are on. The four embed models are operator-supplied
+ONNX files at config paths, Florence-2 is an operator-supplied local
+directory of weights plus processor files, and the tagger is an
+operator-supplied ONNX file plus two data files. Nothing is downloaded at
+runtime. In production mode a missing file for an enabled role is a fatal
+startup error, never a 200 with empty arrays.
 
 - Face detector: SCRFD-10G (`det_10g.onnx`, from the buffalo_l pack).
   Letterboxes to 640x640, decodes the per-stride SCRFD outputs, and returns
@@ -72,6 +124,26 @@ never a 200 with empty arrays.
 - Object detector: YOLOv8n ONNX. Letterboxed 640x640, per-class max
   confidence, class-agnostic NMS at IoU 0.45, COCO-80 labels. Objects below
   `object_score_min` (default 0.35) are dropped, at most 30 per image.
+- Florence-2 (describe, gated by `routes.describe_enabled`): loaded by
+  transformers from an operator-supplied local directory of weights plus
+  processor files (`models.florence_dir_path`), not from a single ONNX
+  file. It serves the closed set of Florence-2 wire tasks via
+  `POST /v1/describe`: caption tasks return generated `text`, and
+  region tasks such as `<OD>` return a `regions` array. It is generative:
+  on an object-free input, regions can be empty or low confidence.
+- WD14 tagger (tag, gated by `routes.tag_enabled`): an operator-supplied
+  ONNX tagger (`models.tagger_onnx_path`) served via `POST /v1/tag`. Tag
+  scores map to names through an operator-supplied ordered tag-name list
+  (`models.tag_names_path`, one tag name per line, in output-column order,
+  length equal to the score vector length — a mismatch is a fatal startup
+  error), and names listed in `models.tag_suppress_path` are never returned
+  on the wire. Tags above `tag_threshold` are returned as an ordered list
+  of tag plus score.
+
+Both describe roles are loaded only when their startup switches are `true`;
+with a switch `false` the role is not loaded, its files are not required,
+it is not counted in `models_loaded`, and the route returns 404
+`route.disabled`.
 
 Face NMS runs tighter than the object path: **class-agnostic NMS at IoU 0.40**
 (`vision_embed/pipeline.py`), then faces above `det_score_min` (default 0.5)
@@ -107,16 +179,27 @@ deployment configuration, not a contract change.
 ## Config and fail-closed behavior
 
 Config is a YAML file with a closed key set. Unknown keys are fatal at
-startup, as are invalid values. Config never holds token values: the bearer
+startup, as are invalid values. Two startup switches under `routes:` —
+`describe_enabled` and `tag_enabled`, both default `false` — decide whether
+Florence-2 and the WD14 tagger are loaded at all; the switch is read at
+startup only, and changing it requires a restart. When a switch is `true`
+and the provider is `CUDAExecutionProvider`, its matching
+`routes.describe_min_free_bytes` / `routes.tag_min_free_bytes` key
+(integer bytes, no default) is required; a route that fails the startup
+free-memory gate is not loaded and behaves exactly as disabled, with
+`unavailable_reason: "gpu.insufficient"` reported on `/v1/runtime`, and the
+process never exits for this gate. Config never holds token values: the bearer
 token is read once at startup from a path, and the operator supplies a TLS
 cert/key pair and the token file.
 
 Two modes:
 
 - `adapter_mode: production` requires TLS to be enabled with a readable cert
-  and key pair that OpenSSL can load. It also requires all four weight files
-  to exist. Production refuses anything less and exits with one JSON fatal
-  line on stdout.
+  and key pair that OpenSSL can load. It also requires the weight and data
+  files of every enabled role to exist (the four embed ONNX files always;
+  the Florence-2 directory and the WD14 tagger files only when the
+  corresponding route switch is `true`). Production refuses anything less and
+  exits with one JSON fatal line on stdout.
 - `adapter_mode: test` with `models.adapter: fake` starts with zero ONNX
   files. The fake adapter set is deterministic, seeded from image content,
   and exercises the full request, response, and audit path without weights.
@@ -156,9 +239,16 @@ call site.
 
 ## Observability
 
-Metrics are plain Prometheus on a separate port (default 9090): request and
-error counters by reason token, request latency, and a `models_loaded` gauge.
-No labels carry image-derived values. The audit stream is the one JSON line
+Metrics are plain Prometheus on a separate port (default 9090); the port is
+unauthenticated. The core series are eight: four embed-scope
+(`vision_embed_requests_total`, `vision_embed_latency_seconds`,
+`vision_embed_errors_total`, and the `vision_embed_models_loaded` gauge)
+plus, when at least one describe/tag route is enabled, four describe-scope
+series (`vision_describe_requests_total`, `vision_describe_latency_seconds`,
+`vision_describe_errors_total`, and the `vision_describe_models_loaded`
+gauge, which counts the loaded describe/tag roles). Series for a disabled
+route are absent, not stuck at zero. No labels carry image-derived values.
+The audit stream is the one JSON line
 per request described above, including healthz, readyz, and closed-surface
 404/405 responses.
 

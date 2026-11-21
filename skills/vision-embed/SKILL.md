@@ -29,10 +29,46 @@ Two separate services, one contract each. Know which one you are calling.
 - `GET /readyz`
 - `POST /v1/embed` — multipart form; the field name for the image is
   `image`. An `include_object_vectors` flag is optional.
+- `POST /v1/describe` — multipart form. Image field name is `image`; the
+  task field is `task`, whose value must be one of the closed set of
+  Florence-2 wire tasks (including `<CAPTION>`, `<OD>`, and
+  `<MORE_DETAILED_CAPTION>`; the full closed set is in the spec). Returns
+  the model (`florence2`), the echoed `task`, and either `text` or a
+  `regions` array.
+- `POST /v1/tag` — multipart form. Image field name is `image`; the
+  threshold field is **`tag_threshold`**. Returns the model (`wd14`),
+  `threshold_used`, and `tags` as a list of `tag` plus `score`.
+- `GET /v1/runtime` — authenticated operator inventory: `uptime_seconds`,
+  the execution provider, the three route flags, the six models in fixed
+  order each with `loaded` and `unavailable_reason`, and a `gpu` object.
+  It takes no image and loads no model.
 
 The request/response schema and the exact error tokens are defined in
 `docs/spec/vision-embed-SPEC.md`, section 6. Do not guess them; consult the
 spec rather than pasting or reconstructing it here.
+
+## Field-name rules for the multipart routes
+
+- The image part is always named `image` on all three POST routes.
+- `describe` takes the task in the field named `task`. Closed values only;
+  anything else is 422 `task.unsupported`.
+- `tag` takes the threshold in the field named `tag_threshold`. A bare
+  `threshold` field is silently ignored and yields 422 `decode.failed` with
+  message `missing tag_threshold field`.
+- curl pitfall: `curl -F task=<OD>` makes curl treat `<OD>` as a file path
+  and it exits 26 before any request is sent. Send the task field with
+  `--form-string` (for example `--form-string 'task=<OD>'`).
+
+## Retrying on the POST routes
+
+- 429 `gpu.busy`: another GPU inference is running — the three POST routes
+  share one in-process lock under `CUDAExecutionProvider`, there is no
+  queue, and the caller retries. Do not retry in a tight loop. On CPU there
+  is no lock and no `gpu.busy`.
+- 404 `route.disabled`: the route is switched off at startup (the
+  `routes.describe_enabled` / `routes.tag_enabled` startup switches, both
+  default `false`; read only at startup). Do not retry it as if transient —
+  it will not come back without an operator restarting the service.
 
 ## vision-index routes (names only; details in spec)
 

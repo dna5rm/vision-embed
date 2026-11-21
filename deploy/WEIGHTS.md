@@ -1,12 +1,17 @@
-# WEIGHTS.md — obtaining the four ONNX files
+# WEIGHTS.md — obtaining the model files for the six roles
 
 Read this before the embed deployment, not after it hits startup failure.
 
 **First: only the production embed service needs model weights.** The test
 suite runs entirely on a deterministic fake adapter and needs no ONNX files at
 all, and **vision-index never runs a model** — it calls embed over HTTPS. Only
-the embed service started with `adapter_mode: "production"` requires the four
-model files to exist at the configured paths; without them startup fails. If
+the embed service started with `adapter_mode: "production"` requires the model
+files of its enabled roles to exist at the configured paths; without them
+startup fails. Which files are required depends on the startup switches
+`routes.describe_enabled` and `routes.tag_enabled` (both default `false`):
+the four ONNX files below are always required, while the Florence-2
+directory and the three WD14 tagger files are required only when the
+corresponding switch is `true`. If
 you are only running tests or only the index, you can skip this document.
 
 Filenames are fixed by the deploy config and spec. Do not substitute a
@@ -17,6 +22,15 @@ against the config paths in `deploy/config.example.yaml`:
 - `w600k_r50.onnx`
 - `yolov8n.onnx`
 - `openai-ViT-L-14-visual.onnx`
+- `florence2/` — an operator-supplied local **directory** of Florence-2
+  weights plus processor files (not a single ONNX file); needed only when
+  `routes.describe_enabled` is `true`, path pinned by `models.florence_dir_path`
+- `wd14.onnx`, `tag_names.txt`, and `tag_suppress.txt` — the WD14 tagger's
+  ONNX file and two operator data files (an ordered tag-name list, one name
+  per line, and a suppress list of tag names never returned on the wire);
+  needed only when `routes.tag_enabled` is `true`, paths pinned by
+  `models.tagger_onnx_path`, `models.tag_names_path`, and
+  `models.tag_suppress_path`
 
 ## 1. `det_10g.onnx` and `w600k_r50.onnx` — InsightFace buffalo_l
 
@@ -122,8 +136,16 @@ terms (see the CLIP README) when using these weights.
 | `w600k_r50.onnx` | same as above, from same zip | No — operator-supplied |
 | `yolov8n.onnx` | official `yolov8n.pt` → export per Ultralytics docs | No — operator-supplied |
 | `openai-ViT-L-14-visual.onnx` | operator's export of OpenAI CLIP ViT-L/14 visual tower; no citeable canonical ONNX | No — operator-supplied |
+| `florence2/` (directory: weights + processor files) | operator-supplied; the spec cites no canonical weight URL and forbids inventing one | No — operator-supplied |
+| `wd14.onnx` | operator-supplied WD14 Danbooru ONNX tagger family file; the spec cites no canonical weight URL and forbids inventing one | No — operator-supplied |
+| `tag_names.txt` | operator-authored ordered tag-name list, one name per line, length equal to the tagger's score vector | No — operator-authored |
+| `tag_suppress.txt` | operator-authored list of tag names never returned on the wire | No — operator-authored |
 
-All four files land in the operator's `models/` directory and are bind-mounted
-read-only; they are never baked into the image and never downloaded at
-runtime (no fetch step in the image or entrypoint). Directory layout and
-mount rules are in `deploy/DEPLOY.md` step 2 and the spec.
+All operator-supplied files land in the operator's `models/` directory and
+are bind-mounted read-only; they are never baked into the image and never
+downloaded at runtime (no fetch step in the image or entrypoint). The four
+embed ONNX files are required in every production embed deployment; the
+Florence-2 directory and the three WD14 tagger files are required only when
+the corresponding route switch (`routes.describe_enabled` /
+`routes.tag_enabled`) is `true`. Directory layout and mount rules are in
+`deploy/DEPLOY.md` step 2 and the spec.

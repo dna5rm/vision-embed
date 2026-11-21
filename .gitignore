@@ -11,3 +11,6 @@ authz.bearer
 config.yaml
 config.index.yaml
 docs/internal/
+
+# QA run artifacts cite live hostnames, IPs, /srv paths and fixture filenames.
+docs/qa/

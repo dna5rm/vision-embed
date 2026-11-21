@@ -26,12 +26,15 @@ EXPECTED_TOKENS = {
     "limits.body_too_large",
     "format.unsupported",
     "decode.failed",
+    "task.unsupported",
+    "route.disabled",
     "auth.invalid_token",
     "inference.failed",
     "response.validation_failed",
     "route.not_found",
     "method.not_allowed",
     "not_ready",
+    "gpu.busy",
 }
 
 
@@ -199,7 +202,7 @@ def test_reason_token_set_is_closed_in_code(running):
     from vision_embed.errors import REASON_TOKENS
 
     assert REASON_TOKENS == EXPECTED_TOKENS
-    # every reason= literal in the codebase must be one of the nine (plus startup tokens)
+    # every reason= literal in the codebase must be one of the twelve (plus startup tokens)
     tokens_in_code = set()
     for py in (REPO / "vision_embed").rglob("*.py"):
         for m in re.finditer(r'reason\s*=\s*["\']([a-z_.]+)["\']', py.read_text()):

@@ -7,7 +7,9 @@ Two programs, one contract each.
 
 **vision-embed** is a stateless measurement service. It accepts one image and
 returns face boxes with 512-dim embeddings, COCO-80 object labels, and one
-768-dim scene vector. It stores nothing: no photos, no vectors, no names, no
+768-dim scene vector; two more routes add a generated image caption or
+region description (Florence-2) and an ordered tag list with scores (a WD14
+ONNX tagger). It stores nothing: no photos, no vectors, no names, no
 cluster ids, no state across requests or restarts. It holds no image bytes at
 any point after a request is answered.
 
@@ -24,18 +26,31 @@ versions produce identical vectors within per-element |a-b| <= 2e-5
 where state, clustering, and naming live. Keeping them apart means nothing
 derived from identity ever leaks back into the measurement service.
 
+The describe and tag routes do not carry that determinism statement: a
+caption is generated text and must not be byte-compared across runs or
+providers, and tag scores on CUDA vary slightly between identical runs
+(measured: two identical tag calls on the same image returned the same 53
+tags in the same order with a maximum absolute score delta of 2.38e-07).
+The practical rule is that tag membership and order are stable and scores
+agree to about 1e-5, while captions are generated text and must not be
+byte-compared across providers.
+
 Documentation:
 
-- `docs/how-it-works.md` — walk-through of the request path, the four model
+- `docs/how-it-works.md` — walk-through of the request path, the six model
   roles, config, and observability.
 - `docs/spec/` — the contracts. `vision-embed-SPEC.md`,
-  `vision-index-SPEC.md`, and `vision-embed-cuda-SPEC.md`; the first two
-  are DRAFT v4, the CUDA spec is DRAFT v1.
+  `vision-index-SPEC.md`, `vision-embed-cuda-SPEC.md`, and
+  `vision-describe-SPEC.md`; the first two are DRAFT v4, the CUDA spec is
+  DRAFT v1, and the describe spec (the `/v1/describe`, `/v1/tag`, and
+  `/v1/runtime` contract) is DRAFT v12.
 - `docs/REPO.md` — what belongs in git and what must stay out.
 - `skills/vision-embed/SKILL.md` — a public caller skill (plain markdown) for
   an external agent that drives vision-embed or vision-index.
-- `deploy/WEIGHTS.md` — where the four ONNX weights come from (only needed
-  for production embed; tests and vision-index need no weights).
+- `deploy/WEIGHTS.md` — where the weights for the six model roles come from
+  (only needed for production embed; the Florence-2 directory and the WD14
+  tagger files are required only when the corresponding route switch is
+  enabled; tests and vision-index need no weights).
 - `deploy/` — generic Docker deployment (`DEPLOY.md`, Dockerfiles, compose,
   config examples).
 
@@ -59,7 +74,10 @@ python3.12 -m venv .venv
 ```
 
 Those are the app pins from deploy/DEPLOY.md, plus httpx and pytest; GPU
-wheels are not required to run the tests.
+wheels are not required to run the tests. (The image additionally pins
+torch==2.6.0, torchvision==0.21.0, transformers==4.48.3, timm==1.0.15,
+einops==0.8.1, and nvidia-ml-py==13.615.71 for the Florence-2 and tagger
+roles; verify against deploy/Dockerfile before relying on that list.)
 
 The embed tests run against a deterministic fake adapter (seeded from image
 content), so no ONNX weights are needed. Skips apply where tests need

@@ -9,7 +9,9 @@ contains secrets.
 - `deploy/Dockerfile.index` — index service image build
 - `deploy/docker-compose.yml` — compose definition for the embed and index services
 - `deploy/.gitignore` — keeps certs/models/secrets out of the repo
-- `deploy/WEIGHTS.md` — where the four ONNX weights come from (embed only)
+- `deploy/WEIGHTS.md` — where the model files for the six roles come from
+  (embed always; the Florence-2 directory and the WD14 tagger files only
+  when the describe/tag switches are enabled)
 - `deploy/config.example.yaml` — embed config; copy and fill in, never commit the deployed copy
 - `deploy/config.index.example.yaml` — index config; same rule
 
@@ -61,6 +63,11 @@ models:
   face_embed_path: "/models/w600k_r50.onnx"
   scene_embed_path: "/models/openai-ViT-L-14-visual.onnx"
   object_det_path: "/models/yolov8n.onnx"
+  # describe/tag roles (needed only when the routes.* switch below is true):
+  florence_dir_path: "/models/florence2/"             # operator-supplied directory of weights + processor files
+  tagger_onnx_path: "/models/wd14.onnx"
+  tag_names_path: "/models/tag_names.txt"             # ordered tag-name list, one per line
+  tag_suppress_path: "/models/tag_suppress.txt"       # tag names never returned on the wire
   det_score_min: 0.5
   object_score_min: 0.35
   max_faces: 20
@@ -77,6 +84,25 @@ adapter_mode: "production"
 Unknown config keys are fatal at startup. Choose one of the two execution
 providers; the app preflights the provider and exits fatal if the configured
 provider is not actually available — there is no silent CPU fallback.
+
+## Optional describe and tag routes
+
+`POST /v1/describe` (Florence-2) and `POST /v1/tag` (WD14 tagger) are
+**optional** routes of the same process, gated by `routes.describe_enabled`
+and `routes.tag_enabled`, both default `false`; the switch is read at
+startup only, and changing it requires a restart. With both `false` the
+default deployment is embed-only: Florence-2 is not loaded, its weight and
+processor files are not required, the WD14 files are not required,
+`models_loaded` is 4, and a POST to either route returns 404
+`route.disabled`. A deployment that wants embed only needs neither the
+Florence-2 directory nor the WD14 files. When a switch is `true`, the
+fail-closed rule stands — a missing weight or data file is a fatal startup
+error — and, under `CUDAExecutionProvider`, the matching
+`routes.describe_min_free_bytes` / `routes.tag_min_free_bytes` key
+(integer bytes, no default) is required; a route that fails the startup
+free-memory gate is not loaded and behaves exactly as disabled
+(`unavailable_reason: "gpu.insufficient"` in `/v1/runtime`), and the
+process still binds.
 
 ## GPU reservation
 
@@ -104,8 +130,10 @@ there is no acceptance envelope yet.
 
 - Non-root `65532:65532` (`user:` + Dockerfile `USER`).
 - `read_only: true` rootfs; writable only via a 128 MiB tmpfs at `/tmp`.
-- All mounts read-only (`:ro`); bearer file, TLS key, and the four model files
-  are bind mounts never baked into the image and never env vars.
+- All mounts read-only (`:ro`); bearer file, TLS key, and the model files of
+  the enabled roles (for the six-role deployment: the four ONNX files, the
+  Florence-2 directory, and the WD14 tagger's data files) are bind mounts
+  never baked into the image and never env vars.
 - TLS-only listener on `8443` inside the container (uvicorn
   `--ssl-certfile/--ssl-keyfile`); metrics on 9090, same process, one worker.
 - No runtime model download: no fetch step in the image or entrypoint.
@@ -115,8 +143,11 @@ there is no acceptance envelope yet.
 
 1. Copy `deploy/` files wherever the operator's compose tree lives.
 2. Create `config/`, `models/`, `tls/`, `secrets/` directories locally. Put
-   the four ONNX weights there — but get them from verified sources first, per
-   `deploy/WEIGHTS.md`. Also put the TLS cert/key pair and bearer token file
+   the four embed ONNX weights there — but get them from verified sources first, per
+   `deploy/WEIGHTS.md`. Add the Florence-2 directory (a directory of weights
+   plus processor files, not a single ONNX file) and the WD14 tagger's
+   `wd14.onnx`, `tag_names.txt`, and `tag_suppress.txt` only when the
+   corresponding route switch is enabled. Also put the TLS cert/key pair and bearer token file
    there (permissions `0400`, owner `65532` for `privkey.pem` and the bearer
    file).
 3. Fill in `config.yaml` from the example; set the model paths and provider.

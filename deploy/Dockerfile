@@ -35,9 +35,15 @@ RUN apt-get update \
 # image was verified against, so no rebuild needed on redeploy.
 RUN python3.12 -m venv /opt/venv \
  && /opt/venv/bin/pip install --no-cache-dir \
+      torch==2.6.0 \
+      torchvision==0.21.0 \
+      transformers==4.48.3 \
+      timm==1.0.15 \
+      einops==0.8.1 \
+      "nvidia-ml-py==13.615.71" \
       "onnxruntime-gpu==1.20.0" \
-      "nvidia-cudnn-cu12==9.26.0.51" \
-      "nvidia-cublas-cu12==12.9.3.13" \
+      "nvidia-cudnn-cu12>=9.1,<10" \
+      "nvidia-cublas-cu12>=12.4,<13" \
       "fastapi==0.115.6" \
       "uvicorn==0.34.0" \
       "python-multipart==0.0.20" \
@@ -48,7 +54,9 @@ RUN python3.12 -m venv /opt/venv \
       "prometheus_client==0.21.1"
 
 # cuDNN 9 (+ its cublas wheel dep) from the nvidia pip wheels, on the loader
-# path for the CUDA EP.
+# path for the CUDA EP. HF cache goes to /tmp (the writable tmpfs in compose)
+# because the rootfs is read-only; Florence-2 custom code writes nothing else.
+ENV HF_HOME=/tmp/hf
 ENV LD_LIBRARY_PATH=/opt/venv/lib/python3.12/site-packages/nvidia/cudnn/lib:/opt/venv/lib/python3.12/site-packages/nvidia/cublas/lib
 
 ENV PATH="/opt/venv/bin:${PATH}"

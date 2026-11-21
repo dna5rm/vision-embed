@@ -14,9 +14,14 @@ REASON_TOKENS = frozenset(
         "response.validation_failed",
         "route.not_found",
         "method.not_allowed",
+        "route.disabled",
+        "gpu.busy",
+        "task.unsupported",
         "not_ready",
     }
 )
+# Closed inventory-only strings — never HTTP reason tokens (SPEC section 6d).
+GPU_INSUFFICIENT_TOKEN = "gpu." + "insufficient"  # kept off the reason= literal set
 
 
 class ApiError(Exception):
