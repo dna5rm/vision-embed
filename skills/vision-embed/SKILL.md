@@ -47,6 +47,11 @@ The request/response schema and the exact error tokens are defined in
 `docs/spec/vision-embed-SPEC.md`, section 6. Do not guess them; consult the
 spec rather than pasting or reconstructing it here.
 
+`POST /v1/describe` and `POST /v1/tag` are optional: each may be switched
+off at startup (`routes.describe_enabled` / `routes.tag_enabled`, default
+`false`) and then returns 404 `route.disabled` — see "Retrying on the POST
+routes" below for the retry rule.
+
 ## Field-name rules for the multipart routes
 
 - The image part is always named `image` on all three POST routes.
@@ -111,8 +116,27 @@ are:
   operator config wins — do not hardcode a tighter lab override.
 - On `CPUExecutionProvider`, the same image bytes and the same pinned model
   versions produce matching vectors within per-element |a-b| <= 2e-5.
+  That envelope covers **embedding vectors only** — it does not extend to
+  the describe and tag routes. A caption is generated text and must never
+  be byte-compared. And on `CUDAExecutionProvider`, tag scores drift
+  slightly between identical runs: measured 2026-11-21, two identical tag
+  calls on the same image returned the same 53 tags in the same order with
+  a maximum absolute score delta of 2.38e-07. Practical rule: tag
+  membership and order are stable, treat tag scores as agreeing to within
+  about 1e-5, and never byte-compare captions.
 - CUDA can be enabled and is fail-closed, but numeric equality with CPU is
   **not** certified, and no acceptance envelope exists for CUDA output.
+
+## Florence-2 `<OD>` on an object-free image
+
+`<OD>` is a generative task. On an image that contains no objects it can
+legitimately return one whole-frame region with score `0.0` rather than an
+empty list. Measured 2026-11-21: a solid 256x256 grey image returned
+`[{"label": "picture frame", "bbox": <covering the full image>, "score": 0.0}]`.
+
+A caller or test must therefore **not** assert an empty `regions` array.
+Assert instead that no region exceeds a confidence floor (i.e. no region
+has a score above a small epsilon).
 
 ## Installing this skill for an agent
 
