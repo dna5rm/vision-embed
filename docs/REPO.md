@@ -3,6 +3,8 @@
 ## Belongs in git
 
 - `vision_embed/` and `vision_index/` source packages
+- `vision-index.py` — the standalone identity-index CLI (source at the repo
+  root)
 - `tests/` and `tests/index/`
 - `deploy/` — Dockerfiles, compose example, `.gitignore`, `config.example.yaml`,
   `config.index.example.yaml`, and `WEIGHTS.md`

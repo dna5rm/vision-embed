@@ -267,3 +267,47 @@ Docker tooling and are skipped where it is absent.
 `deploy/` holds a generic Docker build (`DEPLOY.md`) for either service.
 Weights, TLS material, and token files are operator-supplied bind mounts,
 never baked into the images, never committed.
+
+## The vision-index CLI
+
+Alongside the HTTP service, a standalone CLI ships at the repo root as
+`vision-index.py`. It gives one operator a private identity index without
+standing up the index service.
+
+The request path is: the script reads an image, posts it to the embed
+service (`POST /v1/embed`), receives the face vectors back, and does the
+nearest-neighbour match itself against its own SQLite store (sqlite-vec).
+It runs no models and holds no server.
+
+Two storage rules, mirrored from the service contract
+(`vision_index/store.py` is the canonical join rule the script follows; the
+schema is not restated here):
+
+- `identify` is read-only. It computes a nearest-neighbour match against
+  existing vectors and writes nothing to the database.
+- `enroll` writes. It stores the new face clusters (and an assigned name
+  only if `--name` is given or a later `name` call assigns one).
+
+Environment variables:
+
+- `VISION_EMBED_URL` — embed service base URL (default `https://127.0.0.1:8443`).
+- `VISION_EMBED_TOKEN` — bearer token; required. Without it the CLI exits
+  with code 2 and names the variable, before doing anything else.
+- `VISION_INDEX_DB` — SQLite path
+  (default `~/.local/share/vision-index/index.sqlite3`), per user.
+- `VISION_FACE_MATCH_MAX` — cosine distance floor for a same-person match
+  (default 0.15; note the HTTP service's spec default is 0.40 — the CLI is a
+  separate deployment choice).
+- `VISION_EMBED_CA` — optional path to a CA bundle for the TLS conn.
+
+TLS to the embed service uses trust-on-first-use for self-signed servers:
+the CLI fingerprints the peer cert with a metadata-only probe **before**
+the request body is sent, so each call makes exactly one POST — the image
+bytes are never uploaded twice. The pin file lives at
+`~/.config/vision-index/tls-fingerprints.json`. There is no
+"verify=False" mode and no curl-style `-k` bypass.
+
+Output shape: one JSON object on stdout (indented on a TTY, compact when
+piped). An empty index answers `{"faces": [], "count": N, "index": "empty"}`.
+Errors go as a single JSON line on stderr with exit code 1. `--help` needs
+no database and loads no optional dependencies.

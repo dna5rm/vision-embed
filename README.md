@@ -13,11 +13,15 @@ ONNX tagger). It stores nothing: no photos, no vectors, no names, no
 cluster ids, no state across requests or restarts. It holds no image bytes at
 any point after a request is answered.
 
-**vision-index** is a separate stateful identity index. It calls vision-embed
-over HTTPS, keeps vectors and cluster ids in SQLite, and records a name only
-when an operator assigns one. It runs no models itself. One index per
-operator: indexes do not share identity data. There is no GUI; the operator
-drives both services over their HTTP surfaces.
+**vision-index** is a separate stateful identity index. The primary
+interface is the `vision-index.py` script at the repo root: a standalone CLI
+and library that calls vision-embed over HTTPS for embeddings and keeps
+vectors and cluster ids in a per-user SQLite file, recording a name only
+when an operator assigns one. It runs no models itself. Indexes do not
+share identity data. The HTTP service in `vision_index/` remains for
+anyone who needs a shared multi-agent index, but it is no longer the
+default. There is no GUI; operations go through the CLI or the HTTP
+surfaces.
 
 The split is deliberate: **measurement** (embed) is pure and repeatable —
 on `CPUExecutionProvider`, the same image bytes and the same pinned model
@@ -57,8 +61,11 @@ Documentation:
 ## What's in the repo
 
 - `vision_embed/` — the measurement service (FastAPI + ONNX Runtime).
-- `vision_index/` — the identity index (HTTPS client of the embed service,
-  SQLite-backed).
+- `vision-index.py` — the standalone identity-index CLI (single script at
+  the repo root; SQLite-backed, calls the embed service over HTTPS).
+- `vision_index/` — the identity index as an HTTP service (HTTPS client of
+  the embed service, SQLite-backed). Its HTTP surface is optional; the CLI
+  above is the primary interface.
 - `tests/` — pytest suite covering the HTTP contracts for both services,
   config fail-closed rules, the NMS unit, the CUDA provider rules,
   observability, and container contracts.
@@ -99,6 +106,33 @@ there is no acceptance envelope yet.
 Note on thresholds: the clustering `face_match_max` default in the index spec
 is **0.40**. A deployment may set a tighter live value in its own config; the
 spec number is not changed by doing so.
+
+## Using the CLI
+
+`vision-index.py` is a standalone face identity index over the vision-embed
+service. It talks HTTP to the embed server for embeddings and keeps a local
+SQLite index; it runs no models and no server of its own.
+
+```sh
+export VISION_EMBED_TOKEN=<token from an operator-supplied file>
+python3 vision-index.py identify photo.jpg
+```
+
+Subcommands:
+
+```text
+vision-index.py identify <image>            who is in this image; writes nothing
+vision-index.py enroll <image> [--name N]   add to index; unnamed cluster unless --name
+vision-index.py name <cluster_id> <name>    assign/rename a cluster
+vision-index.py clusters [--unnamed]        list clusters
+vision-index.py people                      list named people only
+```
+
+The index lives by default at `~/.local/share/vision-index/index.sqlite3`
+(override with `VISION_INDEX_DB`). `identify` is read-only and writes
+nothing to the index; `enroll` does write, adding the image's face clusters.
+`python3 vision-index.py --help` lists all options and environment
+variables.
 
 ## Out of scope until a spec change
 
