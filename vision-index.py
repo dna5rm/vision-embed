@@ -54,56 +54,97 @@ def _die(reason: str, detail: str = "") -> None:
 
 def _bootstrap_sqlite_vec() -> None:
     """sqlite-vec (plus numpy) is the only non-stdlib dep, needed only when the
-    DB opens. Install into a python that has pip and re-exec; if this
-    interpreter has no pip at all, fall back to an existing venv one."""
+    DB opens. Order: this interpreter -> existing candidate interpreters that
+    already import it -> a candidate with pip -> build ~/.local/venv. Only the
+    DB-opening code path reaches this; --help and non-DB subcommands never do."""
     import glob
     import importlib.util
     import subprocess
+    import sys  # noqa: F811
 
-    def _importable(python) -> bool:
-        return (
-            subprocess.run(
-                [python, "-c", "import sqlite_vec, numpy"], capture_output=True
-            ).returncode
-            == 0
-        )
+    try:
+        import sqlite_vec  # noqa: F401
 
-    import sys  # noqa: F811 (local rebind reads clearer)
-
-    if importlib.util.find_spec("sqlite_vec") is not None:
         return
+    except ImportError:
+        pass
+
+    def py_run(python: str, code: str) -> bool:
+        return subprocess.run([python, "-c", code], capture_output=True).returncode == 0
+
+    HAS_DEP = "import sqlite_vec, numpy"
+    HAS_PIP = "import pip"
 
     candidates = []
     venv_dir = os.environ.get("VIRTUAL_ENV")
     if venv_dir:
         candidates.append(os.path.join(venv_dir, "bin", "python"))
-    candidates += sorted(
-        glob.glob(os.path.expanduser("~/.local/venv*/bin/python")),
-        key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0,
-        reverse=True,
-    )
+    by_mtime = lambda paths: sorted(paths, key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
+    candidates += by_mtime(glob.glob(os.path.expanduser("~/.local/venv*/bin/python")))
+    candidates += by_mtime(glob.glob(os.path.expanduser("~/.hermes/tools/python-*/bin/python3")))
+    candidates = [p for p in dict.fromkeys(candidates) if os.path.exists(p)]
 
-    # A venv interpreter that already has the dep: just move to it.
+    # (c) a candidate interpreter already carries the dep: move to it.
     for py in candidates:
-        if os.path.exists(py) and _importable(py):
+        if py != sys.executable and py_run(py, HAS_DEP):
             os.execve(py, [py] + sys.argv, os.environ)
 
-    # Otherwise install into the first candidate that carries pip.
-    targets = [sys.executable] + [py for py in candidates if os.path.exists(py)]
-    seen = set()
-    for py in targets:
-        if py in seen:
-            continue
-        seen.add(py)
-        code = subprocess.run(
-            [py, "-m", "pip", "install", "--quiet", "sqlite-vec"],
-            capture_output=True,
-        )
-        if code.returncode == 0 and _importable(py):
-            os.execve(py, [py] + sys.argv, os.environ)
+    # (d) a candidate interpreter has pip: install the dep into it and move.
+    for py in candidates:
+        if py != sys.executable and py_run(py, HAS_PIP):
+            r = subprocess.run(
+                [py, "-m", "pip", "install", "--quiet", "sqlite-vec", "numpy"], capture_output=True
+            )
+            if r.returncode == 0 and py_run(py, HAS_DEP):
+                print(f"vision-index: installed sqlite-vec into {py}", file=sys.stderr)
+                os.execve(py, [py] + sys.argv, os.environ)
+
+    # (e) build a fresh venv with the newest python3 that has ensurepip.
+    venv_python_candidates = [sys.executable, "/usr/bin/python3"]
+    base = None
+    for bp in venv_python_candidates:
+        if os.path.exists(bp) and py_run(bp, "import ensurepip"):
+            base = bp
+            break
+    if base is not None:
+        created = None
+        for target in sorted(
+            glob.glob(os.path.expanduser("~/.local/venv*")),
+            key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0,
+            reverse=True,
+        ):
+            vp = os.path.join(target, "bin", "python")
+            if os.path.exists(vp) and py_run(vp, HAS_DEP):
+                created = vp
+                break
+        if created is None:
+            new_venv = os.path.expanduser("~/.local/venv")
+            r1 = subprocess.run([base, "-m", "venv", new_venv], capture_output=True, text=True)
+            if r1.returncode == 0:
+                new_py = os.path.join(new_venv, "bin", "python")
+                r2 = subprocess.run(
+                    [new_py, "-m", "pip", "install", "--quiet", "sqlite-vec", "numpy"],
+                    capture_output=True,
+                    text=True,
+                )
+                if r2.returncode == 0 and py_run(new_py, HAS_DEP):
+                    print(f"vision-index: created {new_venv} (sqlite-vec installed)", file=sys.stderr)
+                    os.execve(new_py, [new_py] + sys.argv, os.environ)
+                detail = f"pip install failed: {(r2.stderr or '').strip()[-300:]}"
+            else:
+                detail = f"venv create failed: {(r1.stderr or '').strip()[-300:]}"
+        else:
+            os.execve(created, [created] + sys.argv, os.environ)
+    else:
+        detail = "no python3 with ensurepip found"
+
+    # (f) every path exhausted: name the exact remedy.
     _die(
         "bootstrap.failed",
-        "sqlite-vec could not be installed: no interpreter with pip available",
+        "sqlite-vec could not be provided. Run: "
+        + "/usr/bin/python3 -m venv ~/.local/venv && ~/.local/venv/bin/pip install sqlite-vec"
+        +
+        (f" (last error: {detail})" if base is not None else ""),
     )
 
 
@@ -345,9 +386,15 @@ def _embed(image_path: str, base_url: str, token: str) -> dict:
     host = urlparse(base_url).hostname
     port = urlparse(base_url).port or 443
     ca = os.environ.get("VISION_EMBED_CA", "")
-    ctx = _tls_context(ca_path=(ca or None))
+    if ca:
+        ctx = _tls_context(ca_path=ca)
+    else:
+        # No CA configured: pin (TOFU) BEFORE any request bytes are sent, so a
+        # self-signed server costs at most one upload — never a re-POST of the
+        # image after a cert failure. _pin_tls dies on a changed fingerprint.
+        ctx = _tls_context(pinned_pem=_pin_tls(host))
 
-    resp, status, pinned, retried_busy = None, None, False, False
+    resp, status, retried_busy = None, None, False
     for attempt in range(3):
         req = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
@@ -357,14 +404,8 @@ def _embed(image_path: str, base_url: str, token: str) -> dict:
             break
         except ssl.SSLError as exc:
             if "CERTIFICATE_VERIFY_FAILED" in str(exc):
-                # Self-signed server: pin its cert once (fingerprint file), then
-                # trust that exact cert as its own CA here and on every later
-                # connection — chain verification on a chain of length one.
-                if pinned:
-                    _die("tls.verify_failed", str(exc))
-                ctx = _tls_context(pinned_pem=_pin_tls(host))
-                pinned = True
-                continue
+                # The body was already sent; retrying would upload twice. Hard error.
+                _die("tls.verify_failed", str(exc))
             _die("embed.unreachable", str(exc))
         except urllib.error.HTTPError as exc:
             status = exc.code
@@ -385,12 +426,8 @@ def _embed(image_path: str, base_url: str, token: str) -> dict:
         except urllib.error.URLError as exc:
             err = getattr(exc, "reason", None)
             if isinstance(err, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(err):
-                # Same self-signed path: URLError wraps the handshake failure.
-                if pinned:
-                    _die("tls.verify_failed", str(err))
-                ctx = _tls_context(pinned_pem=_pin_tls(host))
-                pinned = True
-                continue
+                # Body already sent — never an upload retry. Hard error.
+                _die("tls.verify_failed", str(err))
             _die("embed.unreachable", str(err or exc.__class__.__name__))
         except OSError as exc:
             _die("embed.unreachable", str(exc.__class__.__name__))
@@ -516,10 +553,8 @@ if args.cmd == "identify":
     try:
         response = _embed(args.image, embed_url, token)
         if conn is None:
-            faces = [
-                {"cluster_id": None, "name": None, "distance": None, "matched": False}
-                for _ in response.get("faces", [])
-            ]
+            n = len(response.get("faces", []))
+            _out({"faces": [], "count": n, "index": "empty"})
         else:
             import sqlite3
 
@@ -528,10 +563,10 @@ if args.cmd == "identify":
             except sqlite3.Error as exc:
                 # An index file that predates the schema simply has no people yet.
                 _die("db.error", f"index unreadable: {exc.__class__.__name__}")
+            _out({"faces": faces, "count": len(faces)})
     finally:
         if conn is not None:
             conn.close()
-    _out({"faces": faces, "count": len(faces)})
 
 elif args.cmd == "enroll":
     import datetime as dt
