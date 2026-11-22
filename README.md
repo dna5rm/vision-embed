@@ -13,11 +13,14 @@ ONNX tagger). It stores nothing: no photos, no vectors, no names, no
 cluster ids, no state across requests or restarts. It holds no image bytes at
 any point after a request is answered.
 
-**vision-index** is a separate stateful identity index shipped as an HTTP
-service (and library) in `vision_index/`: it calls vision-embed over HTTPS
-for embeddings and keeps vectors and cluster ids in a SQLite store,
-recording a name only when an operator assigns one. It runs no models
-itself, and indexes do not share identity data.
+**vision-index** is the identity side: a per-user, standalone CLI
+(`vision-index.py`, installed as `/usr/local/bin/vision-index`). It is a
+single-file, standard-library-only Python program that calls vision-embed
+over HTTPS for embeddings and holds the identity state itself — a local
+SQLite database of vectors, clusters, and names. It runs no models. Each
+user's index is separate: the default database path is per-user, so two
+accounts on the same host do not share identity data. The contract is
+[`docs/spec/vision-index-cli-SPEC.md`](docs/spec/vision-index-cli-SPEC.md).
 
 The split is deliberate: **measurement** (embed) is pure and repeatable —
 on `CPUExecutionProvider`, the same image bytes and the same pinned model
@@ -40,10 +43,9 @@ Documentation:
 - `docs/how-it-works.md` — walk-through of the request path, the six model
   roles, config, and observability.
 - `docs/spec/` — the contracts. `vision-embed-SPEC.md`,
-  `vision-index-SPEC.md`, `vision-embed-cuda-SPEC.md`, and
-  `vision-describe-SPEC.md`; the first two are DRAFT v4, the CUDA spec is
-  DRAFT v1, and the describe spec (the `/v1/describe`, `/v1/tag`, and
-  `/v1/runtime` contract) is DRAFT v12.
+  `vision-embed-cuda-SPEC.md`, and
+  `vision-describe-SPEC.md` cover the service; `vision-index-cli-SPEC.md`
+  is the contract for the `vision-index.py` CLI.
 - `docs/REPO.md` — what belongs in git and what must stay out.
 - `skills/vision-embed/SKILL.md` — a public caller skill (plain markdown) for
   an external agent that drives vision-embed or vision-index.
@@ -56,12 +58,12 @@ Documentation:
 
 ## What's in the repo
 
+- `vision-index.py` — the shipped `vision-index` CLI (single file, stdlib only).
 - `vision_embed/` — the measurement service (FastAPI + ONNX Runtime).
-- `vision_index/` — the identity index as an HTTP service (HTTPS client of
-  the embed service, SQLite-backed); also usable as a library.
-- `tests/` — pytest suite covering the HTTP contracts for both services,
-  config fail-closed rules, the NMS unit, the CUDA provider rules,
-  observability, and container contracts.
+- `tests/` — pytest suites: `tests/test_vision_index_cli.py` is the
+  acceptance suite for the CLI; the remaining suites cover the HTTP
+  contracts for the service, config fail-closed rules, the NMS unit, the
+  CUDA provider rules, observability, and container contracts.
 
 ## Running the tests
 
@@ -81,8 +83,8 @@ roles; verify against deploy/Dockerfile before relying on that list.)
 
 The embed tests run against a deterministic fake adapter (seeded from image
 content), so no ONNX weights are needed. Skips apply where tests need
-container tooling or a real CUDA device. Index tests need no network; the
-index client is exercised against an in-process embed stub.
+container tooling or a real CUDA device. The CLI acceptance suite
+(`tests/test_vision_index_cli.py`) is described below.
 
 Both services use `adapter_mode: production` only with operator-supplied
 weights, TLS cert/key, and a bearer token file; `adapter_mode: test` with
@@ -96,9 +98,179 @@ in `deploy/docker-compose.yml`. Note: the code can enable
 `CUDAExecutionProvider`, but numeric equality with CPU is not certified, and
 there is no acceptance envelope yet.
 
-Note on thresholds: the clustering `face_match_max` default in the index spec
-is **0.40**. A deployment may set a tighter live value in its own config; the
-spec number is not changed by doing so.
+Note on thresholds: the CLI's face match threshold is a hardcoded module
+constant `FACE_MATCH_MAX = 0.28` in `vision-index.py`. There is no
+environment variable, config key, or command-line override for it.
+
+## vision-index: the CLI
+
+`vision-index` is a per-user identity index over photos, standing on
+vision-embed for the measurements. It is one Python file (`vision-index.py`)
+that uses only the standard library, and it keeps all its durable state in
+one local SQLite database. The service it talks to (vision-embed) stores
+nothing; the CLI's database is the only place faces, vectors, clusters, and
+names exist.
+
+The full contract — every command, output shape, and error — is
+[`docs/spec/vision-index-cli-SPEC.md`](docs/spec/vision-index-cli-SPEC.md).
+
+### Install
+
+Copy the single file to the installed location:
+
+```sh
+cp vision-index.py /usr/local/bin/vision-index
+chmod 755 /usr/local/bin/vision-index
+```
+
+The spec requires the installed copy (owner `root:root`, mode `0755`) to be
+byte-identical to the repo copy; compare `vision-index --version` run from
+`PATH` versus the repo file — `--version` prints the script's own sha256 at
+run time, so differing values mean the two copies have drifted.
+
+### Quick start
+
+Enroll a photo, look at the unnamed cluster its faces landed in, record that
+cluster as evidence of a person with `link`, then identify:
+
+```sh
+vision-index enroll a-photo.jpg
+vision-index list clusters --json      # find the unnamed cluster's id
+vision-index link <cluster-id> alice
+vision-index enroll another-photo-of-alice.jpg
+vision-index identify new-photo.jpg
+```
+
+`enroll` never creates or names a person; it embeds photos and clusters their
+faces mechanically. A cluster becomes evidence of a person only through
+`link <cluster_id> <person_name>` (or, in bulk, `link --near <name> <dist>`),
+which creates the person on first use. Names are typed only by the operator —
+there is no automatic naming, ever.
+
+### The bare-file form (primary UX)
+
+With no verb at all, `vision-index <file> [<file> ...]` — including a
+glob — identifies every argument, like the unix `file` command, and prints
+one text line per file:
+
+```sh
+vision-index ~/*.png
+# 20221218_125451.png: alice, probable bob
+```
+
+Each line is `<file>: <names>`:
+
+- a face at or above the detection floor (`FACE_DET_MIN`), at or below the
+  0.28 match threshold, contributes its person's name; a *probable* match
+  prints as `probable <name>` rather than a bare name;
+- a face below the detection floor does NOT contribute a name to the line;
+- if every detected face in a file is below the detection floor, the line
+  reads `<file>: unknown`; a file with no detected faces reads
+  `<file>: no faces`; a failed file reads `<file>: <reason>` and the run
+  continues with the remaining files.
+
+Exit behaviour of the run: `0` if **at least one** file yielded a
+trustworthy matched or probable face; `1` otherwise.
+
+Full verb list from `vision-index --help`:
+
+```text
+usage: vision-index <verb> [args]
+
+Commands:
+  enroll <photo> [<photo> ...]
+      Embed photos, store and cluster their faces (no naming, no person
+      is created). Prints a JSON summary.
+  identify <photo>
+      Identify faces in one photo against named people (read-only).
+      Prints a JSON object with one entry per detected face.
+  <file> [<file> ...]          (bare files or a glob, no verb)
+      Identify every argument after glob expansion, like the unix `file`
+      command: one text line per file, e.g.
+        vision-index ~/*.png
+        20221218_125451.png: alice, probable bob
+  link <cluster_id> <person_name>
+      Record a cluster as evidence of a person.
+  link --near <person_name> <dist>
+      Link every unlinked cluster within <dist> of the person.
+  unlink <cluster_id>
+      The cluster is evidence of nobody.
+  delete cluster <id> [--yes]
+      Delete a cluster and its faces.
+  delete person <name> [--yes]
+      Delete a person, their clusters and faces (cascade).
+  list people | list clusters | list faces [--json]
+      Tabular listing (or JSON with --json).
+  status
+      Unlinked work queue plus the suggested next command (read-only).
+
+  --help                        this text on stderr, exit 0
+  --version                     print the run-time sha256 of this script
+```
+
+Deletions prompt on stderr (`--yes` skips the prompt). `status` and the
+three `list` subcommands never touch the network — they read
+only the local database.
+
+### Configuration
+
+Exactly three environment variables:
+
+| variable | meaning | default |
+|---|---|---|
+| `VISION_EMBED_URL` | base URL of the vision-embed service | `https://vision-embed.invalid:8443` (placeholder; set it to your service) |
+| `VISION_EMBED_TOKEN` | bearer token for the service | none; required for anything that POSTs an image |
+| `VISION_INDEX_DB` | path to the SQLite index | `~/.local/share/vision-index/index.sqlite3` (absolute, honours `$XDG_DATA_HOME`) |
+
+The default database path is per-user, so each account on a host gets its
+own index unless it points `VISION_INDEX_DB` elsewhere. There is no
+multi-user mode.
+
+An optional per-user config file, `~/.config/vision-index/env`, can carry
+the same three variables as `KEY=VALUE` lines (no quoting; blank lines and
+`#` comments ignored). It must be mode `0600` — the CLI refuses a looser
+file with a `config.env_file_permissions` error. Precedence, first wins:
+environment variable, then the config file, then the compiled default.
+
+### Exit codes and errors
+
+- `0` — success.
+- `1` — operation failure. stderr carries exactly one JSON line:
+  `{"error": {"reason": "<token>", "detail": "<optional>"}}`, where
+  `<token>` is from a closed set such as `transport.connect`,
+  `transport.http_status`, `input.unreadable`, `link.no_such_cluster`,
+  `delete.no_such_person`, `delete.no_such_cluster`,
+  `config.env_file_permissions`, `db.absent`, or `aborted`. The detail
+  never contains a full path or another person's name.
+- `2` — usage error or missing token (for example,
+  `error: VISION_EMBED_TOKEN is not set`).
+
+A traceback never reaches the user; unexpected errors become
+`internal.error` with the exception class name only.
+
+### Running the acceptance suite
+
+The suite needs three things from its environment or it skips rather than
+inventing test data: `VISION_INDEX_ACCEPTANCE=1` to opt in to live-service
+use, a real `VISION_EMBED_TOKEN`, and `VISION_INDEX_FIXTURES` pointing at a
+directory of fixture photos with a `manifest.json` of measured distances
+(spec section 13a).
+
+```sh
+VISION_INDEX_ACCEPTANCE=1 \
+VISION_EMBED_TOKEN=<real token> \
+VISION_INDEX_FIXTURES=/path/to/fixtures \
+python -m pytest tests/test_vision_index_cli.py -v
+```
+
+## The abandoned HTTP index service
+
+The previous design was an HTTP service (and library) that exposed index
+operations over authenticated routes with TLS certificates, bearer files,
+and Prometheus metrics. That service was abandoned and replaced by the
+standalone `vision-index` CLI described above. The CLI is the supported
+interface, and the current contract is
+[`docs/spec/vision-index-cli-SPEC.md`](docs/spec/vision-index-cli-SPEC.md).
 
 ## Out of scope until a spec change
 

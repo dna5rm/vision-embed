@@ -30,7 +30,7 @@ Changelog: v12 amendment (status unchanged at DRAFT v12) — section 2e is amend
 Companion documents (read, never edit):
 - `docs/spec/vision-embed-SPEC.md` — the service these routes live on. `/v1/describe` and `/v1/tag` are **routes on vision-embed**, an additive route contract approved by the owner decision recorded in the v6 changelog; they are NOT a sibling service. This document extends vision-embed's closed endpoint set with exactly these two routes and edits nothing else in that spec — except the v7 amendments, which fix lines of that spec that contradicted this document or the CUDA spec: the two-value `execution_provider` allowlist, the `/readyz` readiness condition, and the section 4 `config.example.yaml`, which is the one config example for the one container and now carries the additive `models` keys of section 4 below.
 - `docs/spec/vision-embed-cuda-SPEC.md` — the fail-closed CUDA pattern (executive locks, startup order, no numeric envelope) that this service's provider handling copies.
-- `docs/spec/vision-index-SPEC.md` — the stateful index. **vision-index MUST NOT call these routes.** No route call between vision-index and `/v1/describe` or `/v1/tag` exists in any direction. These routes make no outbound calls at all.
+- **The index is standalone.** **vision-index MUST NOT call these routes.** No route call between vision-index and `/v1/describe` or `/v1/tag` exists in any direction. These routes make no outbound calls at all.
 
 ---
 

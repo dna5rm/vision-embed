@@ -12,11 +12,15 @@ with scores. It returns
 state across requests or restarts, no image bytes held after the response.
 Identity matching is the caller's job, done elsewhere.
 
-That "elsewhere" is vision-index, implemented alongside it in
-`vision_index/`. The index calls vision-embed over HTTPS for measurements,
-keeps the returned vectors and cluster ids in a SQLite database, and records
-a name only when an operator assigns one. It runs no models itself and stores
-no image bytes. Two index operators do not share a people table.
+That "elsewhere" is vision-index, shipped as the standalone CLI
+`vision-index.py` (installed at `/usr/local/bin/vision-index`). The CLI
+calls vision-embed over HTTPS for measurements and keeps the returned
+vectors in a local SQLite database, recording a name only when an operator
+assigns one. It runs no models itself and stores no image bytes. The
+default database path is per-user
+(`~/.local/share/vision-index/index.sqlite3`), so two accounts on the same
+host do not share a people table. Its contract is
+`docs/spec/vision-index-cli-SPEC.md`.
 
 ## Request path
 
@@ -164,17 +168,74 @@ sha256 is for the caller's bookkeeping only.
 
 ## The index side
 
-vision-index keeps state. Its contract (`docs/spec/vision-index-SPEC.md`)
-covers clustering new embeddings against stored ones, cluster merge and
-split operations that the operator triggers, name assignment, and export. A
-repeated image is classified by cosine distance against existing centroids,
-not re-registered as a new person.
+vision-index is not a service. It is `vision-index.py`, a single-file,
+standard-library-only Python CLI at the repo root, and all durable identity
+state lives in one local SQLite database it owns (default
+`~/.local/share/vision-index/index.sqlite3`, per user). The vision-embed
+service it calls stores nothing; the CLI's database is the only place
+faces, vectors, clusters, and names exist. The full contract is
+`docs/spec/vision-index-cli-SPEC.md`.
 
-The clustering threshold default in the spec is `face_match_max: 0.40`.
-Because same-person cosine distances and cross-person distances overlap less
-at tighter margins, a deployment may set a **tighter live threshold** in its
-own config file; the spec number stays 0.40 and tighter operation is a
-deployment configuration, not a contract change.
+The CLI never talks to the service to keep state — it POSTs each image once
+to the embed service (route `POST /v1/embed`) and stores the returned
+vectors itself. Naming is explicit-only: `enroll` puts faces into unnamed
+clusters, and a cluster becomes evidence of a person only when the operator
+runs `link <cluster-id> <person>` (creating the person on first use) or the
+bulk form `link --near <person> <dist>`. A repeated image is matched
+by cosine distance against stored cluster members — identify is read-only
+and never writes.
+
+The face match threshold is a hardcoded module constant,
+`FACE_MATCH_MAX = 0.28`; there is no environment, config, or command-line
+override.
+
+### Known limit: identification reliability depends on enrolled evidence volume (DEC-1)
+
+`identify` matches a probe against the **nearest face across ALL of a
+person's enrolled faces** (`d = min(cosine_distance(vec, pv) for pv in
+vecs)`), not against a centroid or any single reference photo. Because the
+minimum over N enrolled vectors can only decrease as N grows, the distance
+that faces the threshold is partly a function of how much evidence is
+enrolled for that person, not only of who the probe is.
+
+This is a real, measured effect, observed live on a temp DB with an unseen
+probe photo of a known person (`alice`), with the same probe photo and the
+same corpus in both states:
+
+| Enrolled faces of the person | Band       | `nearest_named_distance` |
+|------------------------------|------------|--------------------------|
+| 1                            | `probable` | 0.3871                   |
+| 4                            | `matched`  | 0.1754                   |
+
+Everything was identical in both measurements except the amount of enrolled
+evidence. With `FACE_MATCH_MAX = 0.28`, the person enrolled from one photo
+is below the matched band even though the probe is genuinely them.
+
+Consequences, which apply on purpose and must be worked with, not
+engineered around:
+
+- Identification reliability depends on enrolled evidence volume. A person
+  enrolled from only 1–2 photos is effectively unrecognisable by the
+  tool even for a true match.
+- Practical recommendation: enrol at least ~5 photos of a person before
+  relying on `identify`. Below that, expect `probable` rather than
+  `matched`.
+- `status` surfaces this as an advisory text line for any named person with
+  fewer than 5 enrolled faces, e.g.
+  `warning: person 'alice' has 3 face(s) enrolled; identification needs ~5+ to reach 'matched' reliably`
+  (status is read-only and adds nothing to the DB; the advisory is a
+  text-mode line only — the 13.1 `status --json` shape is closed and gained
+  no field).
+- This behaviour is deliberate under **DEC-1** (false unknown is preferred
+  over false match; see section 3 of the spec). It is NOT a bug. Do not
+  lower `FACE_MATCH_MAX` to "catch" thin-evidence people: lower thresholds
+  are exactly what starts matching strangers, the failure DEC-1 prevents.
+  Threshold changes go through re-measurement and a new DEC (spec O-3),
+  never an edit.
+
+The earlier design — an HTTP service package with clustering
+against centroids, an operator-triggered consolidation step, and export — was
+abandoned in favour of this CLI.
 
 ## Config and fail-closed behavior
 
@@ -254,13 +315,15 @@ per request described above, including healthz, readyz, and closed-surface
 
 ## Tests
 
-The pytest suite under `tests/` (and `tests/index/` for the index service)
-covers the HTTP contracts for both services, config fail-closed rules, the
-NMS unit, provider rules for both CPU and CUDA configuration, observability
-(audit and metrics), and the container contracts. The embed tests run against
-the fake adapter, so the ONNX adapters in `adapters/onnx.py` are exercised by
-the production run itself rather than by this suite; container tests need
-Docker tooling and are skipped where it is absent.
+The pytest suite under `tests/` covers the HTTP contracts of the
+vision-embed service, config fail-closed rules, the NMS unit, provider
+rules for both CPU and CUDA configuration, observability (audit and
+metrics), and the container contracts. `tests/test_vision_index_cli.py`
+is the black-box acceptance suite for the `vision-index.py` CLI (see its
+docstring and `docs/spec/vision-index-cli-SPEC.md`). The embed tests run
+against the fake adapter, so the ONNX adapters in `adapters/onnx.py` are
+exercised by the production run itself rather than by this suite;
+container tests need Docker tooling and are skipped where it is absent.
 
 ## Deployment
 

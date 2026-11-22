@@ -2,11 +2,16 @@
 
 ## Belongs in git
 
-- `vision_embed/` and `vision_index/` source packages
-- `tests/` and `tests/index/`
+- `vision-index.py` — the shipped `vision-index` CLI, at the repo root
+  (single file, stdlib only; the installed copy lives at
+  `/usr/local/bin/vision-index`)
+- `vision_embed/` — the measurement-service source package
+- `tests/` — pytest suites, including `tests/test_vision_index_cli.py`
+  (the CLI acceptance suite)
 - `deploy/` — Dockerfiles, compose example, `.gitignore`, `config.example.yaml`,
-  `config.index.example.yaml`, and `WEIGHTS.md`
-- `docs/` — specs, how-it-works, this file
+  and `WEIGHTS.md`
+- `docs/` — specs (including `vision-index-cli-SPEC.md`,
+  the current vision-index contract), how-it-works, this file
 - `skills/vision-embed/` — the public caller skill (plain markdown)
 - `README.md`
 
@@ -18,7 +23,7 @@
   openai-ViT-L-14-visual, yolov8n), or model files fetched at build/run.
 - **SQLite databases** — any `*.db`/`*.sqlite*` index store or people tables.
 - **Bearer files** — `authz.bearer` or any token material, in any format.
-- **Deployed config** — real `config.yaml` / `config.index.yaml` (only the
+- **Deployed config** — real `config.yaml` (only the
   committed `*.example.yaml` copies are tracked).
 - **Python build/runtime artifacts** — `.venv/`, `__pycache__/`,
   `.pytest_cache/`.
@@ -28,11 +33,3 @@
 
 `deploy/.gitignore` covers `tls/`, `models/`, `secrets/`, and deployed
 `config.yaml`. Do not weaken it.
-
-## Internal notes
-
-`docs/internal/` holds internal architect/engineer notes for the CUDA work.
-These documents still reference internal process and hardware-study detail
-and should **not** be published if they still contain lab detail; they are
-kept out of the public-facing docs intentionally. Prefer scrubbing over
-deleting design decisions.

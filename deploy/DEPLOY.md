@@ -6,14 +6,12 @@ contains secrets.
 ## Files
 
 - `deploy/Dockerfile` — embed service image build
-- `deploy/Dockerfile.index` — index service image build
-- `deploy/docker-compose.yml` — compose definition for the embed and index services
+- `deploy/docker-compose.yml` — compose definition for the embed service
 - `deploy/.gitignore` — keeps certs/models/secrets out of the repo
 - `deploy/WEIGHTS.md` — where the model files for the six roles come from
   (embed always; the Florence-2 directory and the WD14 tagger files only
   when the describe/tag switches are enabled)
 - `deploy/config.example.yaml` — embed config; copy and fill in, never commit the deployed copy
-- `deploy/config.index.example.yaml` — index config; same rule
 
 ## Image and dependency pins
 
@@ -161,9 +159,6 @@ there is no acceptance envelope yet.
 - Image is pinned by digest; no rebuild-pull drift.
 - `.gitignore` excludes `tls/`, `models/`, `secrets/`, and deployed
   `config.yaml` so weights, certs, and tokens never enter the repo.
-- The index service has its own `Dockerfile.index` and
-  `config.index.example.yaml`; it needs no GPU and no model files. A
-  `vision-index` service is pre-declared in `docker-compose.yml`: all host
-  binds use the same `HOST_TREE` placeholder, its SQLite db is the only `rw`
-  mount, and `config.index.yaml` must set
-  `embed.base_url: "https://vision-embed:8443"` on the compose network.
+- The index is standalone and not deployed here: the CLI ships as
+  `vision-index.py` with no container, and no index image or index config
+  belongs in this deployment.
